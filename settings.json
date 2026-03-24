@@ -6,5 +6,8 @@
   "enabledModels": [
     "gpt-5.4*",
     "claude-*-4-6"
+  ],
+  "skills": [
+    "~/.agents/skills"
   ]
 }
