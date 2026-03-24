@@ -1,8 +1,8 @@
 # Secrets
-auth.json
+agent/auth.json
 
 # Ephemeral
-sessions/
+agent/sessions/
 
 # Binaries (installed by pi)
-bin/
+agent/bin/
