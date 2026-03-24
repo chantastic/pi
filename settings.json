@@ -3,6 +3,7 @@
   "defaultProvider": "anthropic",
   "defaultModel": "claude-opus-4-6",
   "defaultThinkingLevel": "medium",
+  "enableSkillCommands": true,
   "enabledModels": [
     "gpt-5.4*",
     "claude-*-4-6"
