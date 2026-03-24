@@ -1,0 +1,8 @@
+# Secrets
+auth.json
+
+# Ephemeral
+sessions/
+
+# Binaries (installed by pi)
+bin/
