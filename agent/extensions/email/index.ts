@@ -5,7 +5,8 @@ import { createServer } from "node:http";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const KEYCHAIN_SERVICE = "pi-email-gmail";
+const TOKEN_KEYCHAIN_SERVICE = "pi-email-gmail";
+const CONFIG_KEYCHAIN_SERVICE = "pi-email-gmail-config";
 const KEYCHAIN_ACCOUNT = "default";
 const REDIRECT_PORT = 53682;
 const REDIRECT_URI = `http://127.0.0.1:${REDIRECT_PORT}/oauth2/callback`;
@@ -20,64 +21,75 @@ type GmailToken = {
   token_type?: string;
 };
 
-function getGoogleClientConfig() {
-  const clientId = process.env.PI_EMAIL_GOOGLE_CLIENT_ID ?? process.env.GOOGLE_CLIENT_ID;
-  const clientSecret = process.env.PI_EMAIL_GOOGLE_CLIENT_SECRET ?? process.env.GOOGLE_CLIENT_SECRET;
+type GoogleClientConfig = {
+  clientId: string;
+  clientSecret: string;
+};
+
+async function readKeychainJson<T>(service: string): Promise<T | null> {
+  try {
+    const { stdout } = await execFileAsync("security", [
+      "find-generic-password",
+      "-s",
+      service,
+      "-a",
+      KEYCHAIN_ACCOUNT,
+      "-w",
+    ]);
+    return JSON.parse(stdout.trim()) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function writeKeychainJson(service: string, value: unknown) {
+  await execFileAsync("security", [
+    "add-generic-password",
+    "-U",
+    "-s",
+    service,
+    "-a",
+    KEYCHAIN_ACCOUNT,
+    "-w",
+    JSON.stringify(value),
+  ]);
+}
+
+async function deleteKeychainItem(service: string) {
+  try {
+    await execFileAsync("security", ["delete-generic-password", "-s", service, "-a", KEYCHAIN_ACCOUNT]);
+  } catch {
+    // Already absent.
+  }
+}
+
+async function getGoogleClientConfig(): Promise<GoogleClientConfig> {
+  const keychainConfig = await readKeychainJson<GoogleClientConfig>(CONFIG_KEYCHAIN_SERVICE);
+  const clientId = keychainConfig?.clientId ?? process.env.PI_EMAIL_GOOGLE_CLIENT_ID ?? process.env.GOOGLE_CLIENT_ID;
+  const clientSecret =
+    keychainConfig?.clientSecret ?? process.env.PI_EMAIL_GOOGLE_CLIENT_SECRET ?? process.env.GOOGLE_CLIENT_SECRET;
 
   if (!clientId || !clientSecret) {
-    throw new Error(
-      "Set PI_EMAIL_GOOGLE_CLIENT_ID and PI_EMAIL_GOOGLE_CLIENT_SECRET for a Google OAuth desktop app.",
-    );
+    throw new Error("Run /email config to store Google OAuth client credentials in macOS Keychain.");
   }
 
   return { clientId, clientSecret };
 }
 
 async function readToken(): Promise<GmailToken | null> {
-  try {
-    const { stdout } = await execFileAsync("security", [
-      "find-generic-password",
-      "-s",
-      KEYCHAIN_SERVICE,
-      "-a",
-      KEYCHAIN_ACCOUNT,
-      "-w",
-    ]);
-    return JSON.parse(stdout.trim()) as GmailToken;
-  } catch {
-    return null;
-  }
+  return readKeychainJson<GmailToken>(TOKEN_KEYCHAIN_SERVICE);
 }
 
 async function writeToken(token: GmailToken) {
-  await execFileAsync("security", [
-    "add-generic-password",
-    "-U",
-    "-s",
-    KEYCHAIN_SERVICE,
-    "-a",
-    KEYCHAIN_ACCOUNT,
-    "-w",
-    JSON.stringify(token),
-  ]);
+  await writeKeychainJson(TOKEN_KEYCHAIN_SERVICE, token);
 }
 
 async function deleteToken() {
-  try {
-    await execFileAsync("security", [
-      "delete-generic-password",
-      "-s",
-      KEYCHAIN_SERVICE,
-      "-a",
-      KEYCHAIN_ACCOUNT,
-    ]);
-  } catch {
-    // Already absent.
-  }
+  await deleteKeychainItem(TOKEN_KEYCHAIN_SERVICE);
 }
 
 async function exchangeCodeForToken(code: string): Promise<GmailToken> {
-  const { clientId, clientSecret } = getGoogleClientConfig();
+  const { clientId, clientSecret } = await getGoogleClientConfig();
   const body = new URLSearchParams({
     code,
     client_id: clientId,
@@ -99,7 +111,7 @@ async function exchangeCodeForToken(code: string): Promise<GmailToken> {
 }
 
 async function startOAuthFlow(): Promise<GmailToken> {
-  const { clientId } = getGoogleClientConfig();
+  const { clientId } = await getGoogleClientConfig();
   const state = crypto.randomUUID();
 
   const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
@@ -147,13 +159,41 @@ export default function (pi: ExtensionAPI) {
       const subcommand = args.trim() || "help";
 
       if (subcommand === "help") {
-        ctx.ui.notify("/email auth, /email status, /email logout", "info");
+        ctx.ui.notify("/email config, /email auth, /email status, /email logout, /email clear-config", "info");
         return;
       }
 
       if (subcommand === "status") {
         const token = await readToken();
-        ctx.ui.notify(token?.refresh_token ? "gmail auth: connected" : "gmail auth: not connected", "info");
+        const config = await readKeychainJson<GoogleClientConfig>(CONFIG_KEYCHAIN_SERVICE);
+        ctx.ui.notify(
+          `gmail auth: ${token?.refresh_token ? "connected" : "not connected"}; config: ${config ? "stored" : "missing"}`,
+          "info",
+        );
+        return;
+      }
+
+      if (subcommand === "config") {
+        const clientId = await ctx.ui.input("Google OAuth client ID", "paste client ID...");
+        if (!clientId) {
+          ctx.ui.notify("email config cancelled", "info");
+          return;
+        }
+
+        const clientSecret = await ctx.ui.input("Google OAuth client secret", "paste client secret...");
+        if (!clientSecret) {
+          ctx.ui.notify("email config cancelled", "info");
+          return;
+        }
+
+        await writeKeychainJson(CONFIG_KEYCHAIN_SERVICE, { clientId: clientId.trim(), clientSecret: clientSecret.trim() });
+        ctx.ui.notify("gmail OAuth config stored in macOS Keychain", "info");
+        return;
+      }
+
+      if (subcommand === "clear-config") {
+        await deleteKeychainItem(CONFIG_KEYCHAIN_SERVICE);
+        ctx.ui.notify("gmail OAuth config removed from Keychain", "info");
         return;
       }
 
