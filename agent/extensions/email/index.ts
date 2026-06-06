@@ -458,6 +458,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (subcommand === "inbox") {
+        ctx.ui.setStatus("email", "email: loading inbox…");
         try {
           const items = await collectInbox(10);
           if (items.length === 0) {
@@ -470,11 +471,14 @@ export default function (pi: ExtensionAPI) {
           );
         } catch (error) {
           ctx.ui.notify(`gmail inbox failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+        } finally {
+          ctx.ui.setStatus("email", undefined);
         }
         return;
       }
 
       if (subcommand === "unsubscribe-candidates") {
+        ctx.ui.setStatus("email", "email: finding unsubscribe candidates…");
         try {
           const candidates = await collectUnsubscribeCandidates(10);
           ctx.ui.notify(
@@ -489,11 +493,14 @@ export default function (pi: ExtensionAPI) {
           );
         } catch (error) {
           ctx.ui.notify(`unsubscribe candidates failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+        } finally {
+          ctx.ui.setStatus("email", undefined);
         }
         return;
       }
 
       if (subcommand === "unsubscribe-sweep") {
+        ctx.ui.setStatus("email", "email: finding unsubscribe candidates…");
         try {
           const candidates = await collectUnsubscribeCandidates(10);
           if (candidates.length === 0) {
@@ -501,14 +508,22 @@ export default function (pi: ExtensionAPI) {
             return;
           }
 
-          for (const candidate of candidates) {
+          for (const [index, candidate] of candidates.entries()) {
+            ctx.ui.setStatus("email", `email: triaging ${index + 1}/${candidates.length}`);
             const label = `${candidate.countFromSenderInInbox} inbox email(s) — ${candidate.sender || candidate.senderEmail}\n${candidate.subject || "(no subject)"}`;
-            const choice = await ctx.ui.select(label, ["1. Unsubscribe and archive all", "2. Archive-only", "3. Escape"]);
+            const choice = await ctx.ui.select(label, [
+              "1. Unsubscribe and archive all",
+              "2. Archive-only",
+              "3. Skip",
+              "4. Escape",
+            ]);
 
-            if (!choice || choice.startsWith("3.")) {
+            if (!choice || choice.startsWith("4.")) {
               ctx.ui.notify("unsubscribe sweep stopped", "info");
               return;
             }
+
+            if (choice.startsWith("3.")) continue;
 
             if (choice.startsWith("1.")) {
               if (candidate.chosenUrl) {
@@ -523,11 +538,14 @@ export default function (pi: ExtensionAPI) {
               }
             }
 
+            ctx.ui.setStatus("email", `email: archiving ${candidate.countFromSenderInInbox} from ${candidate.senderEmail}…`);
             await archiveMessageIds(candidate.archiveMessageIds);
             ctx.ui.notify(`archived ${candidate.countFromSenderInInbox} inbox email(s) from ${candidate.senderEmail}`, "info");
           }
         } catch (error) {
           ctx.ui.notify(`unsubscribe sweep failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+        } finally {
+          ctx.ui.setStatus("email", undefined);
         }
         return;
       }

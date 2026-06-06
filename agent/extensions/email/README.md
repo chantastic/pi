@@ -56,10 +56,13 @@ http://127.0.0.1:53682/oauth2/callback
 - No tokens or secrets are written into this repo.
 - Inbox collection uses `format=metadata` plus Gmail snippets; it does not fetch full message bodies.
 - Unsubscribe candidate collection fetches full latest messages only to extract unsubscribe headers/body links.
+- Long-running commands show an `email:` footer status while loading candidates, triaging, or archiving.
 - `/email unsubscribe-sweep` sorts senders by the number of inbox messages that can be archived, then asks for one of:
   1. Unsubscribe and archive all
   2. Archive-only
-  3. Escape
+  3. Skip
+  4. Escape
+- Skip leaves that sender untouched and moves to the next candidate. Escape stops the sweep.
 - Choosing unsubscribe opens the HTTP unsubscribe link in the local browser when available. It then asks whether unsubscribe worked. If not, it opens a prefilled `mailto:` unsubscribe request.
 - The extension never fetches unsubscribe URLs server-side, clicks through pages, or sends mail. Archiving removes the `INBOX` label from matching messages only after an explicit sweep choice.
 
