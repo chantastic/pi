@@ -10,7 +10,7 @@ const CONFIG_KEYCHAIN_SERVICE = "pi-email-gmail-config";
 const KEYCHAIN_ACCOUNT = "default";
 const REDIRECT_PORT = 53682;
 const REDIRECT_URI = `http://127.0.0.1:${REDIRECT_PORT}/oauth2/callback`;
-const GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
+const GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.modify"];
 const GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1";
 
 type GmailToken = {
@@ -155,30 +155,114 @@ async function collectInbox(maxResults = 10): Promise<InboxItem[]> {
     accessToken,
   );
 
-  const messages = list.messages ?? [];
-  const items = await Promise.all(
-    messages.map(async (message) => {
-      const full = await gmailGet<{
-        id: string;
-        threadId: string;
-        labelIds?: string[];
-        snippet?: string;
-        payload?: { headers?: Array<{ name?: string; value?: string }> };
-      }>(`/users/me/messages/${message.id}?${new URLSearchParams({ format: "metadata" })}`, accessToken);
+  const items: InboxItem[] = [];
+  for (const message of list.messages ?? []) {
+    const full = await gmailGet<{
+      id: string;
+      threadId: string;
+      labelIds?: string[];
+      snippet?: string;
+      payload?: { headers?: Array<{ name?: string; value?: string }> };
+    }>(`/users/me/messages/${message.id}?${new URLSearchParams({ format: "metadata" })}`, accessToken);
 
-      return {
-        id: full.id,
-        threadId: full.threadId,
-        from: headerValue(full.payload?.headers, "From"),
-        subject: headerValue(full.payload?.headers, "Subject"),
-        date: headerValue(full.payload?.headers, "Date"),
-        snippet: full.snippet ?? "",
-        labelIds: full.labelIds ?? [],
-      };
-    }),
-  );
+    items.push({
+      id: full.id,
+      threadId: full.threadId,
+      from: headerValue(full.payload?.headers, "From"),
+      subject: headerValue(full.payload?.headers, "Subject"),
+      date: headerValue(full.payload?.headers, "Date"),
+      snippet: full.snippet ?? "",
+      labelIds: full.labelIds ?? [],
+    });
+  }
 
   return items;
+}
+
+type GmailPayload = {
+  mimeType?: string;
+  body?: { data?: string };
+  headers?: Array<{ name?: string; value?: string }>;
+  parts?: GmailPayload[];
+};
+
+type UnsubscribeCandidate = {
+  sender: string;
+  senderEmail: string;
+  latestMessageId: string;
+  latestThreadId: string;
+  subject: string;
+  date: string;
+  snippet: string;
+  listUnsubscribe: string;
+  unsubscribeUrls: string[];
+  chosenUrl?: string;
+};
+
+function senderEmail(from: string) {
+  return from.match(/<([^>]+)>/)?.[1]?.toLowerCase() ?? from.trim().toLowerCase();
+}
+
+function decodeBase64Url(data: string) {
+  return Buffer.from(data.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+}
+
+function collectPayloadText(payload: GmailPayload | undefined): string {
+  if (!payload) return "";
+  const own = payload.body?.data ? decodeBase64Url(payload.body.data) : "";
+  return [own, ...(payload.parts ?? []).map(collectPayloadText)].filter(Boolean).join("\n");
+}
+
+function extractHttpUrls(text: string) {
+  return [...text.matchAll(/https?:\/\/[^\s"'<>]+/gi)]
+    .map((match) => match[0].replace(/[),.;]+$/, ""))
+    .filter((url, index, urls) => /unsubscribe|preferences|email-preference/i.test(url) && urls.indexOf(url) === index);
+}
+
+async function collectUnsubscribeCandidates(maxSenders = 10): Promise<UnsubscribeCandidate[]> {
+  const accessToken = await getAccessToken();
+  const list = await gmailGet<{ messages?: Array<{ id: string; threadId: string }> }>(
+    `/users/me/messages?${new URLSearchParams({ q: "in:inbox unsubscribe", maxResults: String(Math.min(maxSenders * 3, 50)) })}`,
+    accessToken,
+  );
+
+  const seenSenders = new Set<string>();
+  const candidates: UnsubscribeCandidate[] = [];
+
+  for (const message of list.messages ?? []) {
+    if (candidates.length >= maxSenders) break;
+    const full = await gmailGet<{
+      id: string;
+      threadId: string;
+      snippet?: string;
+      payload?: GmailPayload;
+    }>(`/users/me/messages/${message.id}?${new URLSearchParams({ format: "full" })}`, accessToken);
+
+    const from = headerValue(full.payload?.headers, "From");
+    const email = senderEmail(from);
+    if (!email || seenSenders.has(email)) continue;
+    seenSenders.add(email);
+
+    const listUnsubscribe = headerValue(full.payload?.headers, "List-Unsubscribe");
+    const headerUrls = extractHttpUrls(listUnsubscribe);
+    const bodyUrls = extractHttpUrls(collectPayloadText(full.payload));
+    const unsubscribeUrls = [...headerUrls, ...bodyUrls].filter((url, index, urls) => urls.indexOf(url) === index);
+
+    candidates.push({
+      sender: from,
+      senderEmail: email,
+      latestMessageId: full.id,
+      latestThreadId: full.threadId,
+      subject: headerValue(full.payload?.headers, "Subject"),
+      date: headerValue(full.payload?.headers, "Date"),
+      snippet: full.snippet ?? "",
+      listUnsubscribe,
+      unsubscribeUrls,
+      chosenUrl: unsubscribeUrls[0],
+    });
+  }
+
+  return candidates;
 }
 
 async function exchangeCodeForToken(code: string): Promise<GmailToken> {
@@ -211,7 +295,7 @@ async function startOAuthFlow(): Promise<GmailToken> {
   authUrl.searchParams.set("client_id", clientId);
   authUrl.searchParams.set("redirect_uri", REDIRECT_URI);
   authUrl.searchParams.set("response_type", "code");
-  authUrl.searchParams.set("scope", GMAIL_READONLY_SCOPE);
+  authUrl.searchParams.set("scope", GMAIL_SCOPES.join(" "));
   authUrl.searchParams.set("access_type", "offline");
   authUrl.searchParams.set("prompt", "consent");
   authUrl.searchParams.set("state", state);
@@ -252,7 +336,10 @@ export default function (pi: ExtensionAPI) {
       const subcommand = args.trim() || "help";
 
       if (subcommand === "help") {
-        ctx.ui.notify("/email config, /email auth, /email status, /email inbox, /email logout, /email clear-config", "info");
+        ctx.ui.notify(
+          "/email config, /email auth, /email status, /email inbox, /email unsubscribe-candidates, /email unsubscribe-open, /email logout, /email clear-config",
+          "info",
+        );
         return;
       }
 
@@ -307,6 +394,42 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
+      if (subcommand === "unsubscribe-candidates") {
+        try {
+          const candidates = await collectUnsubscribeCandidates(10);
+          ctx.ui.notify(
+            candidates.length === 0
+              ? "No unsubscribe candidates found."
+              : candidates
+                  .map((candidate) =>
+                    `${candidate.sender || candidate.senderEmail}: ${candidate.subject || "(no subject)"}\n${candidate.chosenUrl ? `  ${new URL(candidate.chosenUrl).host}` : "  no http unsubscribe URL found"}`,
+                  )
+                  .join("\n"),
+            "info",
+          );
+        } catch (error) {
+          ctx.ui.notify(`unsubscribe candidates failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+        }
+        return;
+      }
+
+      if (subcommand === "unsubscribe-open") {
+        try {
+          const candidates = await collectUnsubscribeCandidates(10);
+          for (const candidate of candidates) {
+            if (!candidate.chosenUrl) continue;
+            const ok = await ctx.ui.confirm(
+              "Open unsubscribe link?",
+              `${candidate.sender || candidate.senderEmail}\n${candidate.subject || "(no subject)"}\n${candidate.chosenUrl}`,
+            );
+            if (ok) await execFileAsync("open", [candidate.chosenUrl]);
+          }
+        } catch (error) {
+          ctx.ui.notify(`unsubscribe open failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+        }
+        return;
+      }
+
       if (subcommand === "auth") {
         try {
           ctx.ui.notify("Opening Google OAuth…", "info");
@@ -354,6 +477,35 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "email_collect_unsubscribe_candidates",
+    label: "Collect Unsubscribe Candidates",
+    description: "Find recent inbox senders with unsubscribe text and extract candidate unsubscribe URLs. Read-only.",
+    parameters: Type.Object({
+      maxSenders: Type.Optional(Type.Number({ minimum: 1, maximum: 25, description: "Maximum senders to inspect" })),
+    }),
+    async execute(_toolCallId, params) {
+      const candidates = await collectUnsubscribeCandidates(params.maxSenders ?? 10);
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              candidates.length === 0
+                ? "No unsubscribe candidates found."
+                : candidates
+                    .map(
+                      (candidate) =>
+                        `- ${candidate.sender || candidate.senderEmail}: ${candidate.subject || "(no subject)"}\n  ${candidate.chosenUrl ?? "No http unsubscribe URL found."}`,
+                    )
+                    .join("\n"),
+          },
+        ],
+        details: { count: candidates.length, candidates },
+      };
+    },
+  });
+
+  pi.registerTool({
     name: "email_status",
     label: "Email Status",
     description: "Report whether the Gmail email extension is authenticated",
@@ -367,7 +519,7 @@ export default function (pi: ExtensionAPI) {
           ready: connected,
           backend: "gmail",
           tokenStorage: "macOS Keychain",
-          scope: GMAIL_READONLY_SCOPE,
+          scopes: GMAIL_SCOPES,
         },
       };
     },
