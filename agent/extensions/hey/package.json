@@ -1,9 +1,0 @@
-{
-  "name": "pi-extension-hey",
-  "private": true,
-  "version": "0.1.0",
-  "description": "Minimal pi extension: registers a /hey command and hey tool.",
-  "pi": {
-    "extensions": ["./index.ts"]
-  }
-}

@@ -1,0 +1,9 @@
+{
+  "name": "pi-extension-email",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Email-focused pi extension scaffold.",
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}

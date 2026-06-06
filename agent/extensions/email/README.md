@@ -1,6 +1,6 @@
-# pi-extension-hey
+# pi-extension-email
 
-Minimal pi extension.
+Minimal email-focused pi extension scaffold.
 
 ## What it includes
 
@@ -9,15 +9,15 @@ Minimal pi extension.
 
 ## What it does
 
-- Registers `/hey`, which shows `hey!`
-- Registers a `hey` tool, which returns `hey!`
+- Registers `/email`, which shows a placeholder
+- Registers an `email_status` tool, which returns a placeholder
 
 ## Local install location
 
 This lives at:
 
 ```text
-~/.pi/agent/extensions/hey/
+~/.pi/agent/extensions/email/
 ```
 
 Pi auto-discovers `~/.pi/agent/extensions/*/index.ts`, so `/reload` is enough after edits.
