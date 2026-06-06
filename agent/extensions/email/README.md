@@ -1,20 +1,45 @@
 # pi-extension-email
 
-Minimal email-focused pi extension scaffold.
+Email-focused pi extension scaffold. Currently supports one Gmail account via Google OAuth and stores tokens in macOS Keychain.
 
-## What it includes
+## Setup
 
-- `index.ts` — extension entrypoint (`export default function (pi) { ... }`)
-- `package.json` — package metadata plus `pi.extensions` for easy extraction/distribution
+Create a Google OAuth Desktop app, then export:
 
-## What it does
+```bash
+export PI_EMAIL_GOOGLE_CLIENT_ID="..."
+export PI_EMAIL_GOOGLE_CLIENT_SECRET="..."
+```
 
-- Registers `/email`, which shows a placeholder
-- Registers an `email_status` tool, which returns a placeholder
+Redirect URI used by the extension:
+
+```text
+http://127.0.0.1:53682/oauth2/callback
+```
+
+## Commands
+
+```text
+/email auth    # open Google OAuth, store token in Keychain
+/email status  # check whether Gmail is connected
+/email logout  # delete stored token
+```
+
+## Tool
+
+- `email_status` — reports backend, storage, scope, and auth readiness
+
+## Security posture
+
+- Uses Gmail API, not IMAP/app passwords.
+- Starts with read-only Gmail scope only:
+  `https://www.googleapis.com/auth/gmail.readonly`
+- Stores OAuth token JSON in macOS Keychain as:
+  - service: `pi-email-gmail`
+  - account: `default`
+- No tokens or secrets are written into this repo.
 
 ## Local install location
-
-This lives at:
 
 ```text
 ~/.pi/agent/extensions/email/
