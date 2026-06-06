@@ -140,12 +140,33 @@ function headerValue(headers: Array<{ name?: string; value?: string }> | undefin
   return headers?.find((header) => header.name?.toLowerCase() === name.toLowerCase())?.value ?? "";
 }
 
-async function gmailGet<T>(path: string, accessToken: string): Promise<T> {
+function formatGmailApiError(status: number, body: string) {
+  const reauthHint = body.includes("insufficient") || body.includes("ACCESS_TOKEN_SCOPE_INSUFFICIENT")
+    ? " Run /email auth to grant the current Gmail scopes."
+    : "";
+  return `Gmail API failed: ${status} ${body}${reauthHint}`;
+}
+
+async function gmailRequest<T>(method: "GET" | "POST", path: string, accessToken: string, body?: unknown): Promise<T> {
   const response = await fetch(`${GMAIL_API_BASE}${path}`, {
-    headers: { authorization: `Bearer ${accessToken}` },
+    method,
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      ...(body ? { "content-type": "application/json" } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
   });
-  if (!response.ok) throw new Error(`Gmail API failed: ${response.status} ${await response.text()}`);
-  return (await response.json()) as T;
+  const text = await response.text();
+  if (!response.ok) throw new Error(formatGmailApiError(response.status, text));
+  return (text ? JSON.parse(text) : {}) as T;
+}
+
+async function gmailGet<T>(path: string, accessToken: string): Promise<T> {
+  return gmailRequest<T>("GET", path, accessToken);
+}
+
+async function gmailPost<T>(path: string, accessToken: string, body: unknown): Promise<T> {
+  return gmailRequest<T>("POST", path, accessToken, body);
 }
 
 async function collectInbox(maxResults = 10): Promise<InboxItem[]> {
@@ -196,7 +217,10 @@ type UnsubscribeCandidate = {
   snippet: string;
   listUnsubscribe: string;
   unsubscribeUrls: string[];
+  unsubscribeMailtos: string[];
   chosenUrl?: string;
+  archiveMessageIds: string[];
+  countFromSenderInInbox: number;
 };
 
 function senderEmail(from: string) {
@@ -215,8 +239,56 @@ function collectPayloadText(payload: GmailPayload | undefined): string {
 
 function extractHttpUrls(text: string) {
   return [...text.matchAll(/https?:\/\/[^\s"'<>]+/gi)]
-    .map((match) => match[0].replace(/[),.;]+$/, ""))
+    .map((match) => match[0].replace(/&amp;/g, "&").replace(/[),.;]+$/, ""))
     .filter((url, index, urls) => /unsubscribe|preferences|email-preference/i.test(url) && urls.indexOf(url) === index);
+}
+
+function extractMailtos(text: string) {
+  return [...text.matchAll(/mailto:[^\s"'<>]+/gi)]
+    .map((match) => match[0].replace(/&amp;/g, "&").replace(/[),.;]+$/, ""))
+    .filter((url, index, urls) => urls.indexOf(url) === index);
+}
+
+async function listMessageIds(query: string, accessToken: string): Promise<string[]> {
+  const ids: string[] = [];
+  let pageToken: string | undefined;
+
+  do {
+    const params = new URLSearchParams({ q: query, maxResults: "500" });
+    if (pageToken) params.set("pageToken", pageToken);
+    const page = await gmailGet<{ messages?: Array<{ id: string }>; nextPageToken?: string }>(
+      `/users/me/messages?${params}`,
+      accessToken,
+    );
+    ids.push(...(page.messages ?? []).map((message) => message.id));
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+
+  return ids;
+}
+
+async function archiveMessageIds(messageIds: string[]) {
+  if (messageIds.length === 0) return;
+  const accessToken = await getAccessToken();
+  for (let index = 0; index < messageIds.length; index += 1000) {
+    await gmailPost(`/users/me/messages/batchModify`, accessToken, {
+      ids: messageIds.slice(index, index + 1000),
+      removeLabelIds: ["INBOX"],
+    });
+  }
+}
+
+function buildMailto(candidate: UnsubscribeCandidate) {
+  const raw = candidate.unsubscribeMailtos[0] ?? `mailto:${candidate.senderEmail}`;
+  const url = new URL(raw);
+  if (!url.searchParams.has("subject")) url.searchParams.set("subject", "Unsubscribe");
+  if (!url.searchParams.has("body")) {
+    url.searchParams.set(
+      "body",
+      `Please unsubscribe me from this mailing list.\n\nSender: ${candidate.sender}\nLatest subject: ${candidate.subject}`,
+    );
+  }
+  return url.toString();
 }
 
 async function collectUnsubscribeCandidates(maxSenders = 10): Promise<UnsubscribeCandidate[]> {
@@ -244,9 +316,14 @@ async function collectUnsubscribeCandidates(maxSenders = 10): Promise<Unsubscrib
     seenSenders.add(email);
 
     const listUnsubscribe = headerValue(full.payload?.headers, "List-Unsubscribe");
+    const bodyText = collectPayloadText(full.payload);
     const headerUrls = extractHttpUrls(listUnsubscribe);
-    const bodyUrls = extractHttpUrls(collectPayloadText(full.payload));
+    const bodyUrls = extractHttpUrls(bodyText);
     const unsubscribeUrls = [...headerUrls, ...bodyUrls].filter((url, index, urls) => urls.indexOf(url) === index);
+    const unsubscribeMailtos = [...extractMailtos(listUnsubscribe), ...extractMailtos(bodyText)].filter(
+      (url, index, urls) => urls.indexOf(url) === index,
+    );
+    const archiveMessageIds = await listMessageIds(`in:inbox from:${email}`, accessToken);
 
     candidates.push({
       sender: from,
@@ -258,11 +335,14 @@ async function collectUnsubscribeCandidates(maxSenders = 10): Promise<Unsubscrib
       snippet: full.snippet ?? "",
       listUnsubscribe,
       unsubscribeUrls,
+      unsubscribeMailtos,
       chosenUrl: unsubscribeUrls[0],
+      archiveMessageIds,
+      countFromSenderInInbox: archiveMessageIds.length,
     });
   }
 
-  return candidates;
+  return candidates.sort((a, b) => b.countFromSenderInInbox - a.countFromSenderInInbox);
 }
 
 async function exchangeCodeForToken(code: string): Promise<GmailToken> {
@@ -337,7 +417,7 @@ export default function (pi: ExtensionAPI) {
 
       if (subcommand === "help") {
         ctx.ui.notify(
-          "/email config, /email auth, /email status, /email inbox, /email unsubscribe-candidates, /email unsubscribe-open, /email logout, /email clear-config",
+          "/email config, /email auth, /email status, /email inbox, /email unsubscribe-candidates, /email unsubscribe-sweep, /email logout, /email clear-config",
           "info",
         );
         return;
@@ -402,7 +482,7 @@ export default function (pi: ExtensionAPI) {
               ? "No unsubscribe candidates found."
               : candidates
                   .map((candidate) =>
-                    `${candidate.sender || candidate.senderEmail}: ${candidate.subject || "(no subject)"}\n${candidate.chosenUrl ? `  ${new URL(candidate.chosenUrl).host}` : "  no http unsubscribe URL found"}`,
+                    `${candidate.countFromSenderInInbox} inbox email(s) — ${candidate.sender || candidate.senderEmail}: ${candidate.subject || "(no subject)"}\n${candidate.chosenUrl ? `  ${new URL(candidate.chosenUrl).host}` : candidate.unsubscribeMailtos[0] ? "  mailto unsubscribe available" : "  no unsubscribe URL found"}`,
                   )
                   .join("\n"),
             "info",
@@ -413,19 +493,41 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      if (subcommand === "unsubscribe-open") {
+      if (subcommand === "unsubscribe-sweep") {
         try {
           const candidates = await collectUnsubscribeCandidates(10);
+          if (candidates.length === 0) {
+            ctx.ui.notify("No unsubscribe candidates found.", "info");
+            return;
+          }
+
           for (const candidate of candidates) {
-            if (!candidate.chosenUrl) continue;
-            const ok = await ctx.ui.confirm(
-              "Open unsubscribe link?",
-              `${candidate.sender || candidate.senderEmail}\n${candidate.subject || "(no subject)"}\n${candidate.chosenUrl}`,
-            );
-            if (ok) await execFileAsync("open", [candidate.chosenUrl]);
+            const label = `${candidate.countFromSenderInInbox} inbox email(s) — ${candidate.sender || candidate.senderEmail}\n${candidate.subject || "(no subject)"}`;
+            const choice = await ctx.ui.select(label, ["1. Unsubscribe and archive all", "2. Archive-only", "3. Escape"]);
+
+            if (!choice || choice.startsWith("3.")) {
+              ctx.ui.notify("unsubscribe sweep stopped", "info");
+              return;
+            }
+
+            if (choice.startsWith("1.")) {
+              if (candidate.chosenUrl) {
+                await execFileAsync("open", [candidate.chosenUrl]);
+                const didUnsubscribe = await ctx.ui.confirm(
+                  "Were you able to unsubscribe?",
+                  "Yes archives this sender now. No opens a prefilled mailto unsubscribe request, then archives this sender.",
+                );
+                if (!didUnsubscribe) await execFileAsync("open", [buildMailto(candidate)]);
+              } else {
+                await execFileAsync("open", [buildMailto(candidate)]);
+              }
+            }
+
+            await archiveMessageIds(candidate.archiveMessageIds);
+            ctx.ui.notify(`archived ${candidate.countFromSenderInInbox} inbox email(s) from ${candidate.senderEmail}`, "info");
           }
         } catch (error) {
-          ctx.ui.notify(`unsubscribe open failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+          ctx.ui.notify(`unsubscribe sweep failed: ${error instanceof Error ? error.message : String(error)}`, "error");
         }
         return;
       }
@@ -495,7 +597,7 @@ export default function (pi: ExtensionAPI) {
                 : candidates
                     .map(
                       (candidate) =>
-                        `- ${candidate.sender || candidate.senderEmail}: ${candidate.subject || "(no subject)"}\n  ${candidate.chosenUrl ?? "No http unsubscribe URL found."}`,
+                        `- ${candidate.countFromSenderInInbox} inbox email(s) — ${candidate.sender || candidate.senderEmail}: ${candidate.subject || "(no subject)"}\n  ${candidate.chosenUrl ?? candidate.unsubscribeMailtos[0] ?? "No unsubscribe URL found."}`,
                     )
                     .join("\n"),
           },
