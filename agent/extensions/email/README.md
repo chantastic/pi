@@ -29,6 +29,7 @@ http://127.0.0.1:53682/oauth2/callback
 /email config       # store Google OAuth client credentials in Keychain
 /email auth         # open Google OAuth, store Gmail token in Keychain
 /email status       # check whether config and Gmail auth are present
+/email inbox        # list recent unread inbox metadata/snippets
 /email logout       # delete stored Gmail token
 /email clear-config # delete stored OAuth client credentials
 ```
@@ -36,6 +37,7 @@ http://127.0.0.1:53682/oauth2/callback
 ## Tool
 
 - `email_status` — reports backend, storage, scope, and auth readiness
+- `email_collect_inbox` — collects recent unread inbox message metadata/snippets, read-only
 
 ## Security posture
 
@@ -47,6 +49,7 @@ http://127.0.0.1:53682/oauth2/callback
   - config service: `pi-email-gmail-config`
   - account: `default`
 - No tokens or secrets are written into this repo.
+- Inbox collection uses `format=metadata` plus Gmail snippets; it does not fetch full message bodies.
 
 ## Local install location
 

@@ -11,6 +11,7 @@ const KEYCHAIN_ACCOUNT = "default";
 const REDIRECT_PORT = 53682;
 const REDIRECT_URI = `http://127.0.0.1:${REDIRECT_PORT}/oauth2/callback`;
 const GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
+const GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1";
 
 type GmailToken = {
   access_token?: string;
@@ -88,6 +89,98 @@ async function deleteToken() {
   await deleteKeychainItem(TOKEN_KEYCHAIN_SERVICE);
 }
 
+async function refreshAccessToken(token: GmailToken): Promise<GmailToken> {
+  if (token.access_token && token.expires_at && token.expires_at > Date.now() + 60_000) return token;
+  if (!token.refresh_token) throw new Error("Missing Gmail refresh token. Run /email auth again.");
+
+  const { clientId, clientSecret } = await getGoogleClientConfig();
+  const response = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: token.refresh_token,
+      grant_type: "refresh_token",
+    }),
+  });
+
+  if (!response.ok) throw new Error(`Token refresh failed: ${response.status} ${await response.text()}`);
+
+  const refreshed = (await response.json()) as GmailToken;
+  const next = {
+    ...token,
+    ...refreshed,
+    refresh_token: token.refresh_token,
+    expires_at: Date.now() + (refreshed.expires_in ?? 0) * 1000,
+  };
+  await writeToken(next);
+  return next;
+}
+
+async function getAccessToken(): Promise<string> {
+  const token = await readToken();
+  if (!token) throw new Error("Gmail is not connected. Run /email auth.");
+  const refreshed = await refreshAccessToken(token);
+  if (!refreshed.access_token) throw new Error("Missing Gmail access token. Run /email auth again.");
+  return refreshed.access_token;
+}
+
+type InboxItem = {
+  id: string;
+  threadId: string;
+  from: string;
+  subject: string;
+  date: string;
+  snippet: string;
+  labelIds: string[];
+};
+
+function headerValue(headers: Array<{ name?: string; value?: string }> | undefined, name: string) {
+  return headers?.find((header) => header.name?.toLowerCase() === name.toLowerCase())?.value ?? "";
+}
+
+async function gmailGet<T>(path: string, accessToken: string): Promise<T> {
+  const response = await fetch(`${GMAIL_API_BASE}${path}`, {
+    headers: { authorization: `Bearer ${accessToken}` },
+  });
+  if (!response.ok) throw new Error(`Gmail API failed: ${response.status} ${await response.text()}`);
+  return (await response.json()) as T;
+}
+
+async function collectInbox(maxResults = 10): Promise<InboxItem[]> {
+  const accessToken = await getAccessToken();
+  const list = await gmailGet<{ messages?: Array<{ id: string; threadId: string }> }>(
+    `/users/me/messages?${new URLSearchParams({ q: "in:inbox is:unread", maxResults: String(maxResults) })}`,
+    accessToken,
+  );
+
+  const messages = list.messages ?? [];
+  const items = await Promise.all(
+    messages.map(async (message) => {
+      const full = await gmailGet<{
+        id: string;
+        threadId: string;
+        labelIds?: string[];
+        snippet?: string;
+        payload?: { headers?: Array<{ name?: string; value?: string }> };
+      }>(`/users/me/messages/${message.id}?${new URLSearchParams({ format: "metadata" })}`, accessToken);
+
+      return {
+        id: full.id,
+        threadId: full.threadId,
+        from: headerValue(full.payload?.headers, "From"),
+        subject: headerValue(full.payload?.headers, "Subject"),
+        date: headerValue(full.payload?.headers, "Date"),
+        snippet: full.snippet ?? "",
+        labelIds: full.labelIds ?? [],
+      };
+    }),
+  );
+
+  return items;
+}
+
 async function exchangeCodeForToken(code: string): Promise<GmailToken> {
   const { clientId, clientSecret } = await getGoogleClientConfig();
   const body = new URLSearchParams({
@@ -159,7 +252,7 @@ export default function (pi: ExtensionAPI) {
       const subcommand = args.trim() || "help";
 
       if (subcommand === "help") {
-        ctx.ui.notify("/email config, /email auth, /email status, /email logout, /email clear-config", "info");
+        ctx.ui.notify("/email config, /email auth, /email status, /email inbox, /email logout, /email clear-config", "info");
         return;
       }
 
@@ -197,6 +290,23 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
+      if (subcommand === "inbox") {
+        try {
+          const items = await collectInbox(10);
+          if (items.length === 0) {
+            ctx.ui.notify("No unread inbox messages found.", "info");
+            return;
+          }
+          ctx.ui.notify(
+            items.map((item) => `${item.from || "unknown"}: ${item.subject || "(no subject)"}`).join("\n"),
+            "info",
+          );
+        } catch (error) {
+          ctx.ui.notify(`gmail inbox failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+        }
+        return;
+      }
+
       if (subcommand === "auth") {
         try {
           ctx.ui.notify("Opening Google OAuth…", "info");
@@ -216,6 +326,30 @@ export default function (pi: ExtensionAPI) {
       }
 
       ctx.ui.notify(`unknown email command: ${subcommand}`, "warn");
+    },
+  });
+
+  pi.registerTool({
+    name: "email_collect_inbox",
+    label: "Collect Gmail Inbox",
+    description: "Collect recent unread Gmail inbox message metadata and snippets. Read-only.",
+    parameters: Type.Object({
+      maxResults: Type.Optional(Type.Number({ minimum: 1, maximum: 25, description: "Maximum unread inbox messages to fetch" })),
+    }),
+    async execute(_toolCallId, params) {
+      const items = await collectInbox(params.maxResults ?? 10);
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              items.length === 0
+                ? "No unread inbox messages found."
+                : items.map((item) => `- ${item.from || "unknown"}: ${item.subject || "(no subject)"}\n  ${item.snippet}`).join("\n"),
+          },
+        ],
+        details: { count: items.length, items },
+      };
     },
   });
 
