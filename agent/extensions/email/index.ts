@@ -559,8 +559,10 @@ function firstReadableExcerpt(item: InboxSweepItem) {
 }
 
 function formatInboxSweepPrompt(item: InboxSweepItem) {
+  const query = `in:inbox from:${item.senderEmail}`;
   return [
     item.from || item.senderEmail || "unknown sender",
+    `Link: ${gmailSearchUrl(query)}`,
     "",
     item.subject || "(no subject)",
     "",
