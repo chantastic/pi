@@ -258,6 +258,10 @@ async function chooseEmailAction(
   });
 }
 
+function gmailSearchUrl(query: string) {
+  return `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
+}
+
 async function confirmBulkAction(ctx: any, actionLabel: string, query: string, summaries: SenderInboxThread[]) {
   return await ctx.ui.custom<boolean>((_tui: unknown, theme: any, _keybindings: unknown, done: (value: boolean) => void) => ({
     render(width: number) {
@@ -266,6 +270,7 @@ async function confirmBulkAction(ctx: any, actionLabel: string, query: string, s
           theme?.fg ? theme.fg("warning", `Confirm ${actionLabel}`) : `Confirm ${actionLabel}`,
           "",
           `Query: ${query}`,
+          `Link: ${gmailSearchUrl(query)}`,
           "",
           "Threads included:",
           ...summaries.map((summary, index) => `${index + 1}. ${summary.subject || "(no subject)"}`),

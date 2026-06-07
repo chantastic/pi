@@ -68,7 +68,7 @@ http://127.0.0.1:53682/oauth2/callback
   - `j` — Skip
   - `q` / `Esc` — Escape
   - `?` — Toggle shortcut legend
-- Archive/Trash messages like this builds a Gmail search from the sender plus up to four meaningful subject keywords, shows the matching thread titles for confirmation, then archives or trashes only after `Return`. `Esc` cancels the bulk action and moves to the next inbox message.
+- Archive/Trash messages like this builds a Gmail search from the sender plus up to four meaningful subject keywords, shows the query, Gmail search link, and matching thread titles for confirmation, then archives or trashes only after `Return`. `Esc` cancels the bulk action and moves to the next inbox message.
 - `/email unsubscribe-sweep` repeatedly finds the newest inbox email containing unsubscribe text, queries all matching inbox threads from that sender, shows the sender email plus thread titles, then accepts Gmail-like shortcuts:
   - `Return` — Unsubscribe and archive all
   - `e` — Archive-only
