@@ -59,7 +59,7 @@ http://127.0.0.1:53682/oauth2/callback
 - `/email inbox-sweep` fetches the full current message and displays the sender, full subject, and a local text excerpt. It does not call Ollama or any remote model provider during triage.
 - Unsubscribe candidate collection fetches full latest messages only to extract unsubscribe headers/body links.
 - Long-running commands show an `email:` footer status while loading candidates, triaging, archiving, moving to spam, or moving to trash.
-- `/email inbox-sweep` repeatedly finds the newest inbox email, shows sender, a Gmail inbox search link for that sender, full subject, and a local text excerpt, then accepts Gmail-like shortcuts:
+- `/email inbox-sweep` repeatedly finds the newest inbox email in a full-screen overlay, shows sender, a Gmail inbox search link for that sender, full subject, and a local text excerpt, then accepts Gmail-like shortcuts:
   - `Return` / `e` — Archive
   - `E` — Archive messages like this
   - `#` — Trash
@@ -69,7 +69,7 @@ http://127.0.0.1:53682/oauth2/callback
   - `q` / `Esc` — Escape
   - `?` — Toggle shortcut legend
 - Archive/Trash messages like this builds a Gmail search from the sender plus up to four meaningful subject keywords, shows the query, Gmail search link, and matching thread titles for confirmation, then archives or trashes only after `Return`. `Esc` cancels the bulk action and moves to the next inbox message.
-- `/email unsubscribe-sweep` repeatedly finds the newest inbox email containing unsubscribe text, queries all matching inbox threads from that sender, shows the sender email plus thread titles, then accepts Gmail-like shortcuts:
+- `/email unsubscribe-sweep` repeatedly finds the newest inbox email containing unsubscribe text in a full-screen overlay, queries all matching inbox threads from that sender, shows the sender email plus thread titles, then accepts Gmail-like shortcuts:
   - `Return` — Unsubscribe and archive all
   - `e` — Archive-only
   - `!` — Spam all

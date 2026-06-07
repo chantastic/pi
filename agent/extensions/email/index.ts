@@ -190,6 +190,21 @@ function actionLegend(actions: EmailAction[]) {
   return actions.map((action) => `${EMAIL_ACTIONS[action].keys.join("/")} ${EMAIL_ACTIONS[action].label}`).join("  ·  ");
 }
 
+function borderLine(width: number, left: string, fill: string, right: string) {
+  return left + fill.repeat(Math.max(0, width - left.length - right.length)) + right;
+}
+
+function boxedLines(title: string, bodyLines: string[], footer: string, width: number, theme: any) {
+  const innerWidth = Math.max(20, width - 4);
+  const topTitle = ` ${title} `;
+  const top = "┌" + topTitle + "─".repeat(Math.max(0, width - topTitle.length - 2)) + "┐";
+  const bottom = borderLine(width, "└", "─", "┘");
+  const separator = borderLine(width, "├", "─", "┤");
+  const content = wrapDisplayLines(bodyLines, innerWidth).map((line) => `│ ${truncateToWidth(line, innerWidth).padEnd(innerWidth)} │`);
+  const footerLine = `│ ${truncateToWidth(footer, innerWidth).padEnd(innerWidth)} │`;
+  return [theme?.fg ? theme.fg("accent", top) : top, ...content, separator, theme?.fg ? theme.fg("muted", footerLine) : footerLine, bottom];
+}
+
 function actionForKey(data: string, actions: EmailAction[]): EmailAction | undefined {
   if (matchesKey(data, Key.enter)) return actions.includes("unsubscribeArchive") ? "unsubscribeArchive" : "archive";
   if (matchesKey(data, Key.escape) || data === "q") return "escape";
@@ -225,21 +240,13 @@ async function chooseEmailAction(
   return await ctx.ui.custom<EmailAction>((tui: { requestRender: () => void }, theme: any, _keybindings: unknown, done: (value: EmailAction) => void) => {
     let showHelp = false;
     const render = (width: number) => {
-      const lines = [
-        theme?.fg ? theme.fg("accent", title) : title,
-        "",
-        ...body.split("\n"),
-        "",
-        actionLegend(actions),
-      ];
+      const bodyLines = body.split("\n");
       if (showHelp) {
-        lines.push("", "Shortcuts:");
-        for (const action of actions) lines.push(`  ${EMAIL_ACTIONS[action].keys.join(" / ")} — ${EMAIL_ACTIONS[action].label}`);
-        lines.push("  ? — Toggle this legend");
-      } else {
-        lines.push("? for shortcuts");
+        bodyLines.push("", "Shortcuts:");
+        for (const action of actions) bodyLines.push(`  ${EMAIL_ACTIONS[action].keys.join(" / ")} — ${EMAIL_ACTIONS[action].label}`);
+        bodyLines.push("  ? — Toggle this legend");
       }
-      return wrapDisplayLines(lines, width);
+      return boxedLines(title, bodyLines, `${actionLegend(actions)}  ·  ? Help`, width, theme);
     };
 
     return {
@@ -255,6 +262,14 @@ async function chooseEmailAction(
       },
       invalidate() {},
     };
+  }, {
+    overlay: true,
+    overlayOptions: {
+      width: "100%",
+      maxHeight: "100%",
+      anchor: "center",
+      margin: 0,
+    },
   });
 }
 
@@ -265,19 +280,18 @@ function gmailSearchUrl(query: string) {
 async function confirmBulkAction(ctx: any, actionLabel: string, query: string, summaries: SenderInboxThread[]) {
   return await ctx.ui.custom<boolean>((_tui: unknown, theme: any, _keybindings: unknown, done: (value: boolean) => void) => ({
     render(width: number) {
-      return wrapDisplayLines(
+      return boxedLines(
+        `Confirm ${actionLabel}`,
         [
-          theme?.fg ? theme.fg("warning", `Confirm ${actionLabel}`) : `Confirm ${actionLabel}`,
-          "",
           `Query: ${query}`,
           `Link: ${gmailSearchUrl(query)}`,
           "",
           "Threads included:",
           ...summaries.map((summary, index) => `${index + 1}. ${summary.subject || "(no subject)"}`),
-          "",
-          "Return — confirm  ·  Esc — cancel and move to next inbox message",
         ],
+        "Return Confirm  ·  Esc Cancel and next",
         width,
+        theme,
       );
     },
     handleInput(data: string) {
@@ -285,7 +299,15 @@ async function confirmBulkAction(ctx: any, actionLabel: string, query: string, s
       if (matchesKey(data, Key.escape)) done(false);
     },
     invalidate() {},
-  }));
+  }), {
+    overlay: true,
+    overlayOptions: {
+      width: "100%",
+      maxHeight: "100%",
+      anchor: "center",
+      margin: 0,
+    },
+  });
 }
 
 async function gmailRequest<T>(method: "GET" | "POST", path: string, accessToken: string, body?: unknown): Promise<T> {
