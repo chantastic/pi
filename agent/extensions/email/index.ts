@@ -196,11 +196,16 @@ function borderLine(width: number, left: string, fill: string, right: string) {
 
 function boxedLines(title: string, bodyLines: string[], footer: string, width: number, theme: any) {
   const innerWidth = Math.max(20, width - 4);
+  const targetHeight = Math.max(12, (process.stdout.rows ?? 24) - 4);
   const topTitle = ` ${title} `;
   const top = "┌" + topTitle + "─".repeat(Math.max(0, width - topTitle.length - 2)) + "┐";
   const bottom = borderLine(width, "└", "─", "┘");
   const separator = borderLine(width, "├", "─", "┤");
-  const content = wrapDisplayLines(bodyLines, innerWidth).map((line) => `│ ${truncateToWidth(line, innerWidth).padEnd(innerWidth)} │`);
+  const wrappedContent = wrapDisplayLines(bodyLines, innerWidth);
+  const contentHeight = Math.max(1, targetHeight - 3);
+  const visibleContent = wrappedContent.slice(0, contentHeight);
+  while (visibleContent.length < contentHeight) visibleContent.push("");
+  const content = visibleContent.map((line) => `│ ${truncateToWidth(line, innerWidth).padEnd(innerWidth)} │`);
   const footerLine = `│ ${truncateToWidth(footer, innerWidth).padEnd(innerWidth)} │`;
   return [theme?.fg ? theme.fg("accent", top) : top, ...content, separator, theme?.fg ? theme.fg("muted", footerLine) : footerLine, bottom];
 }
@@ -267,7 +272,9 @@ async function chooseEmailAction(
     overlayOptions: {
       width: "100%",
       maxHeight: "100%",
-      anchor: "center",
+      anchor: "top-left",
+      row: 0,
+      col: 0,
       margin: 0,
     },
   });
@@ -304,7 +311,9 @@ async function confirmBulkAction(ctx: any, actionLabel: string, query: string, s
     overlayOptions: {
       width: "100%",
       maxHeight: "100%",
-      anchor: "center",
+      anchor: "top-left",
+      row: 0,
+      col: 0,
       margin: 0,
     },
   });
