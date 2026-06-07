@@ -30,6 +30,7 @@ http://127.0.0.1:53682/oauth2/callback
 /email auth                   # open Google OAuth, store Gmail token in Keychain
 /email status                 # check whether config and Gmail auth are present
 /email inbox                  # list recent unread inbox metadata/snippets
+/email inbox-sweep            # auto-play inbox triage with one-sentence summaries
 /email unsubscribe-candidates # list newest unsubscribe senders with inbox thread titles
 /email unsubscribe-sweep      # triage unsubscribe/archive decisions interactively
 /email logout                 # delete stored Gmail token
@@ -55,8 +56,17 @@ http://127.0.0.1:53682/oauth2/callback
   - account: `default`
 - No tokens or secrets are written into this repo.
 - Inbox collection uses `format=metadata` plus Gmail snippets; it does not fetch full message bodies.
+- `/email inbox-sweep` fetches the full current message so it can produce a one-sentence summary. If a pi model is selected, the sender/subject/snippet/body excerpt is sent to that model provider for summarization; otherwise it falls back to a local snippet summary.
 - Unsubscribe candidate collection fetches full latest messages only to extract unsubscribe headers/body links.
-- Long-running commands show an `email:` footer status while loading candidates, triaging, archiving, moving to spam, or moving to trash.
+- Long-running commands show an `email:` footer status while loading candidates, summarizing, triaging, archiving, moving to spam, or moving to trash.
+- `/email inbox-sweep` repeatedly finds the newest inbox email, shows sender/subject/snippet plus a one-sentence summary, then asks for one of:
+  1. Archive
+  2. Trash
+  3. Spam
+  4. Archive other messages like this
+  5. Skip
+  6. Escape
+- Archive other messages like this builds a Gmail search from the sender plus up to four meaningful subject keywords, then archives the matching inbox threads.
 - `/email unsubscribe-sweep` repeatedly finds the newest inbox email containing unsubscribe text, queries all matching inbox threads from that sender, shows the sender email plus thread titles, then asks for one of:
   1. Unsubscribe and archive all
   2. Archive-only

@@ -1,4 +1,5 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { UserMessage } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
@@ -136,6 +137,17 @@ type InboxItem = {
   labelIds: string[];
 };
 
+type InboxSweepItem = {
+  messageId: string;
+  threadId: string;
+  from: string;
+  senderEmail: string;
+  subject: string;
+  date: string;
+  snippet: string;
+  bodyText: string;
+};
+
 function headerValue(headers: Array<{ name?: string; value?: string }> | undefined, name: string) {
   return headers?.find((header) => header.name?.toLowerCase() === name.toLowerCase())?.value ?? "";
 }
@@ -247,6 +259,19 @@ function collectPayloadText(payload: GmailPayload | undefined): string {
   return [own, ...(payload.parts ?? []).map(collectPayloadText)].filter(Boolean).join("\n");
 }
 
+function cleanEmailText(text: string) {
+  return text
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function extractHttpUrls(text: string) {
   return [...text.matchAll(/https?:\/\/[^\s"'<>]+/gi)]
     .map((match) => match[0].replace(/&amp;/g, "&").replace(/[),.;]+$/, ""))
@@ -352,6 +377,140 @@ function formatCandidateSummary(candidate: UnsubscribeCandidate) {
     formatThreadTitles(candidate.inboxThreads),
     candidate.chosenUrl ? `Unsubscribe: ${candidate.chosenUrl}` : "No HTTP unsubscribe URL found.",
   ].join("\n");
+}
+
+async function collectNewestInboxSweepItem(excludedThreadIds = new Set<string>()): Promise<InboxSweepItem | null> {
+  const accessToken = await getAccessToken();
+  let pageToken: string | undefined;
+
+  do {
+    const params = new URLSearchParams({ q: "in:inbox", maxResults: "50" });
+    if (pageToken) params.set("pageToken", pageToken);
+    const page = await gmailGet<{ messages?: Array<{ id: string; threadId: string }>; nextPageToken?: string }>(
+      `/users/me/messages?${params}`,
+      accessToken,
+    );
+
+    for (const message of page.messages ?? []) {
+      if (excludedThreadIds.has(message.threadId)) continue;
+      const full = await gmailGet<{
+        id: string;
+        threadId: string;
+        snippet?: string;
+        payload?: GmailPayload;
+      }>(`/users/me/messages/${message.id}?${new URLSearchParams({ format: "full" })}`, accessToken);
+      if (excludedThreadIds.has(full.threadId)) continue;
+
+      const from = headerValue(full.payload?.headers, "From");
+      return {
+        messageId: full.id,
+        threadId: full.threadId,
+        from,
+        senderEmail: senderEmail(from),
+        subject: headerValue(full.payload?.headers, "Subject"),
+        date: headerValue(full.payload?.headers, "Date"),
+        snippet: full.snippet ?? "",
+        bodyText: cleanEmailText(collectPayloadText(full.payload)),
+      };
+    }
+
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+
+  return null;
+}
+
+const INBOX_SUMMARY_SYSTEM_PROMPT = `You summarize emails for fast inbox triage. Return exactly one concise sentence. Do not include a preamble.`;
+
+function fallbackInboxSummary(item: InboxSweepItem) {
+  const base = item.snippet || item.bodyText || item.subject || "No preview text.";
+  return `${item.senderEmail || item.from || "Unknown sender"} sent ${item.subject ? `“${item.subject}”` : "an email"}: ${base}`
+    .replace(/\s+/g, " ")
+    .slice(0, 240);
+}
+
+async function summarizeInboxSweepItem(item: InboxSweepItem, ctx: ExtensionCommandContext) {
+  if (!ctx.model) return fallbackInboxSummary(item);
+
+  try {
+    const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
+    if (!auth.ok || !auth.apiKey) return fallbackInboxSummary(item);
+
+    const { complete } = await import("@earendil-works/pi-ai");
+    const userMessage: UserMessage = {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: [
+            `From: ${item.from}`,
+            `Subject: ${item.subject}`,
+            `Date: ${item.date}`,
+            `Snippet: ${item.snippet}`,
+            `Body excerpt: ${item.bodyText.slice(0, 4000)}`,
+          ].join("\n"),
+        },
+      ],
+      timestamp: Date.now(),
+    };
+
+    const response = await complete(
+      ctx.model,
+      { systemPrompt: INBOX_SUMMARY_SYSTEM_PROMPT, messages: [userMessage] },
+      { apiKey: auth.apiKey, headers: auth.headers, signal: ctx.signal },
+    );
+
+    if (response.stopReason === "aborted") return fallbackInboxSummary(item);
+    const text = response.content
+      .filter((part): part is { type: "text"; text: string } => part.type === "text")
+      .map((part) => part.text)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    return text || fallbackInboxSummary(item);
+  } catch {
+    return fallbackInboxSummary(item);
+  }
+}
+
+const SUBJECT_STOPWORDS = new Set([
+  "about",
+  "after",
+  "before",
+  "digest",
+  "email",
+  "from",
+  "newsletter",
+  "notification",
+  "this",
+  "today",
+  "update",
+  "weekly",
+  "with",
+  "your",
+]);
+
+function subjectKeywords(subject: string) {
+  return (subject.toLowerCase().match(/[a-z0-9]{4,}/g) ?? [])
+    .filter((word, index, words) => !SUBJECT_STOPWORDS.has(word) && words.indexOf(word) === index)
+    .slice(0, 4);
+}
+
+function similarInboxQuery(item: InboxSweepItem) {
+  const keywords = subjectKeywords(item.subject);
+  const subjectTerms = keywords.map((keyword) => `subject:${keyword}`).join(" ");
+  return [`in:inbox`, `from:${item.senderEmail}`, subjectTerms].filter(Boolean).join(" ");
+}
+
+async function collectSimilarInboxThreadIds(item: InboxSweepItem) {
+  const accessToken = await getAccessToken();
+  const query = similarInboxQuery(item);
+  const threadIds = await listThreadIds(query, accessToken);
+  return {
+    query,
+    threadIds: [item.threadId, ...threadIds].filter((threadId, index, ids) => ids.indexOf(threadId) === index),
+  };
 }
 
 async function collectUnsubscribeCandidates(maxSenders = 10, excludedSenders = new Set<string>()): Promise<UnsubscribeCandidate[]> {
@@ -483,7 +642,7 @@ export default function (pi: ExtensionAPI) {
 
       if (subcommand === "help") {
         ctx.ui.notify(
-          "/email config, /email auth, /email status, /email inbox, /email unsubscribe-candidates, /email unsubscribe-sweep, /email logout, /email clear-config",
+          "/email config, /email auth, /email status, /email inbox, /email inbox-sweep, /email unsubscribe-candidates, /email unsubscribe-sweep, /email logout, /email clear-config",
           "info",
         );
         return;
@@ -537,6 +696,83 @@ export default function (pi: ExtensionAPI) {
           );
         } catch (error) {
           ctx.ui.notify(`gmail inbox failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+        } finally {
+          ctx.ui.setStatus("email", undefined);
+        }
+        return;
+      }
+
+      if (subcommand === "inbox-sweep") {
+        const skippedThreadIds = new Set<string>();
+        let considered = 0;
+
+        try {
+          while (true) {
+            ctx.ui.setStatus("email", "email: finding newest inbox email…");
+            const item = await collectNewestInboxSweepItem(skippedThreadIds);
+            if (!item) {
+              ctx.ui.notify(considered === 0 ? "No inbox emails found." : "inbox sweep complete", "info");
+              return;
+            }
+
+            considered++;
+            ctx.ui.setStatus("email", `email: summarizing ${item.senderEmail || item.from || "email"}…`);
+            const summary = await summarizeInboxSweepItem(item, ctx);
+            ctx.ui.setStatus("email", `email: triaging ${item.senderEmail || item.from || "email"}`);
+            const choice = await ctx.ui.select(
+              [
+                item.senderEmail || item.from || "unknown sender",
+                item.from && item.from !== item.senderEmail ? `From: ${item.from}` : undefined,
+                `Subject: ${item.subject || "(no subject)"}`,
+                `Summary: ${summary}`,
+                item.snippet ? `Snippet: ${item.snippet}` : undefined,
+              ]
+                .filter(Boolean)
+                .join("\n"),
+              ["1. Archive", "2. Trash", "3. Spam", "4. Archive other messages like this", "5. Skip", "6. Escape"],
+            );
+
+            if (!choice || choice.startsWith("6.")) {
+              ctx.ui.notify("inbox sweep stopped", "info");
+              return;
+            }
+
+            if (choice.startsWith("5.")) {
+              skippedThreadIds.add(item.threadId);
+              continue;
+            }
+
+            if (choice.startsWith("1.")) {
+              ctx.ui.setStatus("email", `email: archiving ${item.senderEmail || "thread"}…`);
+              await archiveThreadIds([item.threadId]);
+              ctx.ui.notify(`archived ${item.senderEmail || item.threadId}`, "info");
+              continue;
+            }
+
+            if (choice.startsWith("2.")) {
+              ctx.ui.setStatus("email", `email: moving ${item.senderEmail || "thread"} to trash…`);
+              await trashThreadIds([item.threadId]);
+              ctx.ui.notify(`moved ${item.senderEmail || item.threadId} to trash`, "info");
+              continue;
+            }
+
+            if (choice.startsWith("3.")) {
+              ctx.ui.setStatus("email", `email: moving ${item.senderEmail || "thread"} to spam…`);
+              await spamThreadIds([item.threadId]);
+              ctx.ui.notify(`moved ${item.senderEmail || item.threadId} to spam`, "info");
+              continue;
+            }
+
+            if (choice.startsWith("4.")) {
+              ctx.ui.setStatus("email", `email: finding messages like ${item.senderEmail || "this"}…`);
+              const { query, threadIds } = await collectSimilarInboxThreadIds(item);
+              ctx.ui.setStatus("email", `email: archiving ${threadIds.length} similar thread(s)…`);
+              await archiveThreadIds(threadIds);
+              ctx.ui.notify(`archived ${threadIds.length} similar inbox thread(s) using query: ${query}`, "info");
+            }
+          }
+        } catch (error) {
+          ctx.ui.notify(`inbox sweep failed: ${error instanceof Error ? error.message : String(error)}`, "error");
         } finally {
           ctx.ui.setStatus("email", undefined);
         }
