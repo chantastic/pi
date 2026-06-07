@@ -194,7 +194,7 @@ function borderLine(width: number, left: string, fill: string, right: string) {
   return left + fill.repeat(Math.max(0, width - left.length - right.length)) + right;
 }
 
-function boxedLines(title: string, bodyLines: string[], footer: string, width: number, theme: any) {
+function boxedLines(title: string, bodyLines: string[], footer: string, width: number, theme: any, scrollOffset = 0) {
   const innerWidth = Math.max(20, width - 4);
   const targetHeight = Math.max(12, (process.stdout.rows ?? 24) - 4);
   const topTitle = ` ${title} `;
@@ -203,10 +203,13 @@ function boxedLines(title: string, bodyLines: string[], footer: string, width: n
   const separator = borderLine(width, "├", "─", "┤");
   const wrappedContent = wrapDisplayLines(bodyLines, innerWidth);
   const contentHeight = Math.max(1, targetHeight - 3);
-  const visibleContent = wrappedContent.slice(0, contentHeight);
+  const maxScroll = Math.max(0, wrappedContent.length - contentHeight);
+  const offset = Math.min(Math.max(0, scrollOffset), maxScroll);
+  const scrollInfo = maxScroll > 0 ? ` ↑↓ ${offset + 1}-${Math.min(wrappedContent.length, offset + contentHeight)}/${wrappedContent.length}` : "";
+  const visibleContent = wrappedContent.slice(offset, offset + contentHeight);
   while (visibleContent.length < contentHeight) visibleContent.push("");
   const content = visibleContent.map((line) => `│ ${truncateToWidth(line, innerWidth).padEnd(innerWidth)} │`);
-  const footerLine = `│ ${truncateToWidth(footer, innerWidth).padEnd(innerWidth)} │`;
+  const footerLine = `│ ${truncateToWidth(`${footer}${scrollInfo}`, innerWidth).padEnd(innerWidth)} │`;
   return [theme?.fg ? theme.fg("accent", top) : top, ...content, separator, theme?.fg ? theme.fg("muted", footerLine) : footerLine, bottom];
 }
 
@@ -585,13 +588,14 @@ function firstReadableExcerpt(item: InboxSweepItem) {
 
 function formatInboxSweepPrompt(item: InboxSweepItem) {
   const query = `in:inbox from:${item.senderEmail}`;
+  const body = (item.bodyText || item.snippet || "No preview text.").trim();
   return [
     item.from || item.senderEmail || "unknown sender",
     `Link: ${gmailSearchUrl(query)}`,
     "",
     item.subject || "(no subject)",
     "",
-    firstReadableExcerpt(item),
+    body,
   ].join("\n");
 }
 
@@ -701,6 +705,7 @@ async function runInboxSweep(ctx: any) {
     let considered = 0;
     let processing = false;
     let message = "Loading newest inbox email…";
+    let scrollOffset = 0;
 
     const excludedForNext = () => {
       const excluded = new Set(skippedThreadIds);
@@ -721,6 +726,7 @@ async function runInboxSweep(ctx: any) {
       message = "Loading next inbox email…";
       tui.requestRender();
       item = usePrefetch && nextItemPromise ? await nextItemPromise : await collectNewestInboxSweepItem(skippedThreadIds);
+      scrollOffset = 0;
       processing = false;
       if (!item) {
         ctx.ui.notify(considered === 0 ? "No inbox emails found." : "inbox sweep complete", "info");
@@ -804,9 +810,29 @@ async function runInboxSweep(ctx: any) {
       render(width: number) {
         const body = item ? formatInboxSweepPrompt(item).split("\n") : [message];
         if (processing) body.push("", theme?.fg ? theme.fg("muted", message) : message);
-        return boxedLines("Inbox sweep", body, `${actionLegend(INBOX_SWEEP_ACTIONS)}  ·  ? Help`, width, theme);
+        return boxedLines("Inbox sweep", body, `${actionLegend(INBOX_SWEEP_ACTIONS)}  ·  ↑/↓ Scroll  ·  ? Help`, width, theme, scrollOffset);
       },
       handleInput(data: string) {
+        if (matchesKey(data, Key.up)) {
+          scrollOffset = Math.max(0, scrollOffset - 1);
+          tui.requestRender();
+          return;
+        }
+        if (matchesKey(data, Key.down)) {
+          scrollOffset += 1;
+          tui.requestRender();
+          return;
+        }
+        if (matchesKey(data, "pageup")) {
+          scrollOffset = Math.max(0, scrollOffset - 10);
+          tui.requestRender();
+          return;
+        }
+        if (matchesKey(data, "pagedown")) {
+          scrollOffset += 10;
+          tui.requestRender();
+          return;
+        }
         const action = actionForKey(data, INBOX_SWEEP_ACTIONS);
         if (action) void act(action);
       },
