@@ -823,12 +823,12 @@ async function runInboxSweep(ctx: any) {
           tui.requestRender();
           return;
         }
-        if (matchesKey(data, "pageup")) {
+        if (matchesKey(data, "pageup") || matchesKey(data, Key.ctrl("u"))) {
           scrollOffset = Math.max(0, scrollOffset - 10);
           tui.requestRender();
           return;
         }
-        if (matchesKey(data, "pagedown")) {
+        if (matchesKey(data, "pagedown") || matchesKey(data, Key.ctrl("d"))) {
           scrollOffset += 10;
           tui.requestRender();
           return;
