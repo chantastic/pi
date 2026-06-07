@@ -56,15 +56,17 @@ http://127.0.0.1:53682/oauth2/callback
 - No tokens or secrets are written into this repo.
 - Inbox collection uses `format=metadata` plus Gmail snippets; it does not fetch full message bodies.
 - Unsubscribe candidate collection fetches full latest messages only to extract unsubscribe headers/body links.
-- Long-running commands show an `email:` footer status while loading candidates, triaging, or archiving.
+- Long-running commands show an `email:` footer status while loading candidates, triaging, archiving, moving to spam, or moving to trash.
 - `/email unsubscribe-sweep` repeatedly finds the newest inbox email containing unsubscribe text, queries all matching inbox threads from that sender, shows the sender email plus thread titles, then asks for one of:
   1. Unsubscribe and archive all
   2. Archive-only
-  3. Skip
-  4. Escape
-- Skip leaves that sender untouched and moves to the next candidate. Escape stops the sweep.
+  3. Spam all
+  4. Trash all
+  5. Skip
+  6. Escape
+- Spam all applies Gmail's `SPAM` label and removes `INBOX` from the matching threads. Trash all moves matching threads to Gmail Trash. Skip leaves that sender untouched for this run and moves to the next candidate. Escape stops the sweep.
 - Choosing unsubscribe opens the HTTP unsubscribe link in the local browser when available, then archives the matching inbox threads. It does not ask for confirmation or fall back to `mailto:` yet.
-- The extension never fetches unsubscribe URLs server-side, clicks through pages, or sends mail. Archiving removes the `INBOX` label from matching Gmail threads only after an explicit sweep choice.
+- The extension never fetches unsubscribe URLs server-side, clicks through pages, or sends mail. Archive/spam/trash actions run only after an explicit sweep choice.
 - Archive targets always include the candidate's latest thread plus all inbox threads matching the sender email. This avoids leaving the selected sender visible when Gmail's thread UI and message-level searches disagree.
 
 ## Local install location

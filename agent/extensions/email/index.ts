@@ -287,6 +287,25 @@ async function archiveThreadIds(threadIds: string[]) {
   }
 }
 
+async function spamThreadIds(threadIds: string[]) {
+  if (threadIds.length === 0) return;
+  const accessToken = await getAccessToken();
+  for (const threadId of threadIds) {
+    await gmailPost(`/users/me/threads/${encodeURIComponent(threadId)}/modify`, accessToken, {
+      addLabelIds: ["SPAM"],
+      removeLabelIds: ["INBOX"],
+    });
+  }
+}
+
+async function trashThreadIds(threadIds: string[]) {
+  if (threadIds.length === 0) return;
+  const accessToken = await getAccessToken();
+  for (const threadId of threadIds) {
+    await gmailPost(`/users/me/threads/${encodeURIComponent(threadId)}/trash`, accessToken, {});
+  }
+}
+
 async function collectThreadSummaries(threadIds: string[], accessToken: string): Promise<SenderInboxThread[]> {
   const summaries: SenderInboxThread[] = [];
 
@@ -560,16 +579,18 @@ export default function (pi: ExtensionAPI) {
             const choice = await ctx.ui.select(formatCandidatePrompt(candidate), [
               "1. Unsubscribe and archive all",
               "2. Archive-only",
-              "3. Skip",
-              "4. Escape",
+              "3. Spam all",
+              "4. Trash all",
+              "5. Skip",
+              "6. Escape",
             ]);
 
-            if (!choice || choice.startsWith("4.")) {
+            if (!choice || choice.startsWith("6.")) {
               ctx.ui.notify("unsubscribe sweep stopped", "info");
               return;
             }
 
-            if (choice.startsWith("3.")) {
+            if (choice.startsWith("5.")) {
               skippedSenders.add(candidate.senderEmail);
               continue;
             }
@@ -577,6 +598,20 @@ export default function (pi: ExtensionAPI) {
             if (choice.startsWith("1.")) {
               if (candidate.chosenUrl) await execFileAsync("open", [candidate.chosenUrl]);
               else ctx.ui.notify(`No HTTP unsubscribe link found for ${candidate.senderEmail}. Archiving only.`, "warning");
+            }
+
+            if (choice.startsWith("3.")) {
+              ctx.ui.setStatus("email", `email: moving ${candidate.countInboxThreadsFromSender} thread(s) from ${candidate.senderEmail} to spam…`);
+              await spamThreadIds(candidate.archiveThreadIds);
+              ctx.ui.notify(`moved ${candidate.countInboxThreadsFromSender} inbox thread(s) from ${candidate.senderEmail} to spam`, "info");
+              continue;
+            }
+
+            if (choice.startsWith("4.")) {
+              ctx.ui.setStatus("email", `email: moving ${candidate.countInboxThreadsFromSender} thread(s) from ${candidate.senderEmail} to trash…`);
+              await trashThreadIds(candidate.archiveThreadIds);
+              ctx.ui.notify(`moved ${candidate.countInboxThreadsFromSender} inbox thread(s) from ${candidate.senderEmail} to trash`, "info");
+              continue;
             }
 
             ctx.ui.setStatus("email", `email: archiving ${candidate.countInboxThreadsFromSender} thread(s) from ${candidate.senderEmail}…`);
