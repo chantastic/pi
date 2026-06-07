@@ -202,6 +202,20 @@ function actionForKey(data: string, actions: EmailAction[]): EmailAction | undef
   return undefined;
 }
 
+function wrapDisplayLines(lines: string[], width: number) {
+  return lines.flatMap((line) => {
+    if (!line) return [""];
+    const chunks: string[] = [];
+    let rest = line;
+    while (rest.length > width) {
+      chunks.push(truncateToWidth(rest, width));
+      rest = rest.slice(width);
+    }
+    chunks.push(truncateToWidth(rest, width));
+    return chunks;
+  });
+}
+
 async function chooseEmailAction(
   ctx: any,
   title: string,
@@ -225,17 +239,7 @@ async function chooseEmailAction(
       } else {
         lines.push("? for shortcuts");
       }
-      return lines.flatMap((line) => {
-        if (!line) return [""];
-        const chunks: string[] = [];
-        let rest = line;
-        while (rest.length > width) {
-          chunks.push(truncateToWidth(rest, width));
-          rest = rest.slice(width);
-        }
-        chunks.push(truncateToWidth(rest, width));
-        return chunks;
-      });
+      return wrapDisplayLines(lines, width);
     };
 
     return {
@@ -252,6 +256,31 @@ async function chooseEmailAction(
       invalidate() {},
     };
   });
+}
+
+async function confirmBulkAction(ctx: any, actionLabel: string, query: string, summaries: SenderInboxThread[]) {
+  return await ctx.ui.custom<boolean>((_tui: unknown, theme: any, _keybindings: unknown, done: (value: boolean) => void) => ({
+    render(width: number) {
+      return wrapDisplayLines(
+        [
+          theme?.fg ? theme.fg("warning", `Confirm ${actionLabel}`) : `Confirm ${actionLabel}`,
+          "",
+          `Query: ${query}`,
+          "",
+          "Threads included:",
+          ...summaries.map((summary, index) => `${index + 1}. ${summary.subject || "(no subject)"}`),
+          "",
+          "Return — confirm  ·  Esc — cancel and move to next inbox message",
+        ],
+        width,
+      );
+    },
+    handleInput(data: string) {
+      if (matchesKey(data, Key.enter)) done(true);
+      if (matchesKey(data, Key.escape)) done(false);
+    },
+    invalidate() {},
+  }));
 }
 
 async function gmailRequest<T>(method: "GET" | "POST", path: string, accessToken: string, body?: unknown): Promise<T> {
@@ -567,9 +596,11 @@ async function collectSimilarInboxThreadIds(item: InboxSweepItem) {
   const accessToken = await getAccessToken();
   const query = similarInboxQuery(item);
   const threadIds = await listThreadIds(query, accessToken);
+  const uniqueThreadIds = [item.threadId, ...threadIds].filter((threadId, index, ids) => ids.indexOf(threadId) === index);
   return {
     query,
-    threadIds: [item.threadId, ...threadIds].filter((threadId, index, ids) => ids.indexOf(threadId) === index),
+    threadIds: uniqueThreadIds,
+    summaries: await collectThreadSummaries(uniqueThreadIds, accessToken),
   };
 }
 
@@ -817,7 +848,12 @@ export default function (pi: ExtensionAPI) {
 
             if (choice === "archiveSimilar") {
               ctx.ui.setStatus("email", `email: finding messages like ${item.senderEmail || "this"}…`);
-              const { query, threadIds } = await collectSimilarInboxThreadIds(item);
+              const { query, threadIds, summaries } = await collectSimilarInboxThreadIds(item);
+              const confirmed = await confirmBulkAction(ctx, "archive messages like this", query, summaries);
+              if (!confirmed) {
+                skippedThreadIds.add(item.threadId);
+                continue;
+              }
               ctx.ui.setStatus("email", `email: archiving ${threadIds.length} similar thread(s)…`);
               await archiveThreadIds(threadIds);
               ctx.ui.notify(`archived ${threadIds.length} similar inbox thread(s) using query: ${query}`, "info");
@@ -826,7 +862,12 @@ export default function (pi: ExtensionAPI) {
 
             if (choice === "trashSimilar") {
               ctx.ui.setStatus("email", `email: finding messages like ${item.senderEmail || "this"}…`);
-              const { query, threadIds } = await collectSimilarInboxThreadIds(item);
+              const { query, threadIds, summaries } = await collectSimilarInboxThreadIds(item);
+              const confirmed = await confirmBulkAction(ctx, "trash messages like this", query, summaries);
+              if (!confirmed) {
+                skippedThreadIds.add(item.threadId);
+                continue;
+              }
               ctx.ui.setStatus("email", `email: moving ${threadIds.length} similar thread(s) to trash…`);
               await trashThreadIds(threadIds);
               ctx.ui.notify(`moved ${threadIds.length} similar inbox thread(s) to trash using query: ${query}`, "info");
