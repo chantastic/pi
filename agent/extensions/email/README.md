@@ -56,7 +56,7 @@ http://127.0.0.1:53682/oauth2/callback
   - account: `default`
 - No tokens or secrets are written into this repo.
 - Inbox collection uses `format=metadata` plus Gmail snippets; it does not fetch full message bodies.
-- `/email inbox-sweep` fetches the full current message so it can produce a one-sentence summary. If a pi model is selected, the sender/subject/snippet/body excerpt is sent to that model provider for summarization; otherwise it falls back to a local snippet summary.
+- `/email inbox-sweep` fetches the full current message so it can produce a one-sentence summary. Summaries are sent to local Ollama only (`qwen3:8b` by default at `http://localhost:11434`) with `keep_alive: 30m`; if Ollama is unavailable, it falls back to a local snippet summary.
 - Unsubscribe candidate collection fetches full latest messages only to extract unsubscribe headers/body links.
 - Long-running commands show an `email:` footer status while loading candidates, summarizing, triaging, archiving, moving to spam, or moving to trash.
 - `/email inbox-sweep` repeatedly finds the newest inbox email, shows sender/subject/snippet plus a one-sentence summary, then asks for one of:

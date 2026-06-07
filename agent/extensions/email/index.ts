@@ -1,5 +1,4 @@
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import type { UserMessage } from "@earendil-works/pi-ai";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
@@ -13,6 +12,9 @@ const REDIRECT_PORT = 53682;
 const REDIRECT_URI = `http://127.0.0.1:${REDIRECT_PORT}/oauth2/callback`;
 const GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.modify"];
 const GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1";
+const OLLAMA_API_BASE = process.env.PI_EMAIL_OLLAMA_URL ?? "http://localhost:11434";
+const OLLAMA_EMAIL_MODEL = process.env.PI_EMAIL_OLLAMA_MODEL ?? "qwen3:8b";
+const OLLAMA_KEEP_ALIVE = process.env.PI_EMAIL_OLLAMA_KEEP_ALIVE ?? "30m";
 
 type GmailToken = {
   access_token?: string;
@@ -429,42 +431,36 @@ function fallbackInboxSummary(item: InboxSweepItem) {
     .slice(0, 240);
 }
 
-async function summarizeInboxSweepItem(item: InboxSweepItem, ctx: ExtensionCommandContext) {
-  if (!ctx.model) return fallbackInboxSummary(item);
-
+async function summarizeInboxSweepItem(item: InboxSweepItem, signal?: AbortSignal) {
   try {
-    const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
-    if (!auth.ok || !auth.apiKey) return fallbackInboxSummary(item);
+    const response = await fetch(`${OLLAMA_API_BASE}/api/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: OLLAMA_EMAIL_MODEL,
+        keep_alive: OLLAMA_KEEP_ALIVE,
+        stream: false,
+        messages: [
+          { role: "system", content: INBOX_SUMMARY_SYSTEM_PROMPT },
+          {
+            role: "user",
+            content: [
+              `From: ${item.from}`,
+              `Subject: ${item.subject}`,
+              `Date: ${item.date}`,
+              `Snippet: ${item.snippet}`,
+              `Body excerpt: ${item.bodyText.slice(0, 4000)}`,
+            ].join("\n"),
+          },
+        ],
+      }),
+      signal,
+    });
 
-    const { complete } = await import("@earendil-works/pi-ai");
-    const userMessage: UserMessage = {
-      role: "user",
-      content: [
-        {
-          type: "text",
-          text: [
-            `From: ${item.from}`,
-            `Subject: ${item.subject}`,
-            `Date: ${item.date}`,
-            `Snippet: ${item.snippet}`,
-            `Body excerpt: ${item.bodyText.slice(0, 4000)}`,
-          ].join("\n"),
-        },
-      ],
-      timestamp: Date.now(),
-    };
-
-    const response = await complete(
-      ctx.model,
-      { systemPrompt: INBOX_SUMMARY_SYSTEM_PROMPT, messages: [userMessage] },
-      { apiKey: auth.apiKey, headers: auth.headers, signal: ctx.signal },
-    );
-
-    if (response.stopReason === "aborted") return fallbackInboxSummary(item);
-    const text = response.content
-      .filter((part): part is { type: "text"; text: string } => part.type === "text")
-      .map((part) => part.text)
-      .join(" ")
+    if (!response.ok) return fallbackInboxSummary(item);
+    const data = (await response.json()) as { message?: { content?: string } };
+    const text = (data.message?.content ?? "")
+      .replace(/<think>[\s\S]*?<\/think>/gi, "")
       .replace(/\s+/g, " ")
       .trim();
 
@@ -717,7 +713,7 @@ export default function (pi: ExtensionAPI) {
 
             considered++;
             ctx.ui.setStatus("email", `email: summarizing ${item.senderEmail || item.from || "email"}…`);
-            const summary = await summarizeInboxSweepItem(item, ctx);
+            const summary = await summarizeInboxSweepItem(item, ctx.signal);
             ctx.ui.setStatus("email", `email: triaging ${item.senderEmail || item.from || "email"}`);
             const choice = await ctx.ui.select(
               [
@@ -947,6 +943,12 @@ export default function (pi: ExtensionAPI) {
           backend: "gmail",
           tokenStorage: "macOS Keychain",
           scopes: GMAIL_SCOPES,
+          localModel: {
+            provider: "ollama",
+            model: OLLAMA_EMAIL_MODEL,
+            baseUrl: OLLAMA_API_BASE,
+            keepAlive: OLLAMA_KEEP_ALIVE,
+          },
         },
       };
     },
