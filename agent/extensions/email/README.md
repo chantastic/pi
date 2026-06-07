@@ -30,7 +30,7 @@ http://127.0.0.1:53682/oauth2/callback
 /email auth                   # open Google OAuth, store Gmail token in Keychain
 /email status                 # check whether config and Gmail auth are present
 /email inbox                  # list recent unread inbox metadata/snippets
-/email unsubscribe-candidates # list senders sorted by inbox thread archive count
+/email unsubscribe-candidates # list newest unsubscribe senders with inbox thread titles
 /email unsubscribe-sweep      # triage unsubscribe/archive decisions interactively
 /email logout                 # delete stored Gmail token
 /email clear-config           # delete stored OAuth client credentials
@@ -40,7 +40,7 @@ http://127.0.0.1:53682/oauth2/callback
 
 - `email_status` — reports backend, storage, scope, and auth readiness
 - `email_collect_inbox` — collects recent unread inbox message metadata/snippets
-- `email_collect_unsubscribe_candidates` — groups recent inbox messages containing unsubscribe text by sender, extracts candidate unsubscribe URLs/mailtos, and reports how many matching inbox threads would be archived
+- `email_collect_unsubscribe_candidates` — finds newest inbox messages containing unsubscribe text, groups by sender, extracts candidate unsubscribe URLs/mailtos, and reports the matching inbox thread titles that would be archived
 
 ## Security posture
 
@@ -57,13 +57,13 @@ http://127.0.0.1:53682/oauth2/callback
 - Inbox collection uses `format=metadata` plus Gmail snippets; it does not fetch full message bodies.
 - Unsubscribe candidate collection fetches full latest messages only to extract unsubscribe headers/body links.
 - Long-running commands show an `email:` footer status while loading candidates, triaging, or archiving.
-- `/email unsubscribe-sweep` sorts senders by the number of matching inbox threads that can be archived, then asks for one of:
+- `/email unsubscribe-sweep` repeatedly finds the newest inbox email containing unsubscribe text, queries all matching inbox threads from that sender, shows the sender email plus thread titles, then asks for one of:
   1. Unsubscribe and archive all
   2. Archive-only
   3. Skip
   4. Escape
 - Skip leaves that sender untouched and moves to the next candidate. Escape stops the sweep.
-- Choosing unsubscribe opens the HTTP unsubscribe link in the local browser when available. It then asks whether unsubscribe worked. If not, it opens a prefilled `mailto:` unsubscribe request.
+- Choosing unsubscribe opens the HTTP unsubscribe link in the local browser when available, then archives the matching inbox threads. It does not ask for confirmation or fall back to `mailto:` yet.
 - The extension never fetches unsubscribe URLs server-side, clicks through pages, or sends mail. Archiving removes the `INBOX` label from matching Gmail threads only after an explicit sweep choice.
 - Archive targets always include the candidate's latest thread plus all inbox threads matching the sender email. This avoids leaving the selected sender visible when Gmail's thread UI and message-level searches disagree.
 

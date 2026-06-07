@@ -207,6 +207,13 @@ type GmailPayload = {
   parts?: GmailPayload[];
 };
 
+type SenderInboxThread = {
+  threadId: string;
+  subject: string;
+  date: string;
+  snippet: string;
+};
+
 type UnsubscribeCandidate = {
   sender: string;
   senderEmail: string;
@@ -219,6 +226,7 @@ type UnsubscribeCandidate = {
   unsubscribeUrls: string[];
   unsubscribeMailtos: string[];
   chosenUrl?: string;
+  inboxThreads: SenderInboxThread[];
   archiveThreadIds: string[];
   countInboxThreadsFromSender: number;
 };
@@ -279,23 +287,58 @@ async function archiveThreadIds(threadIds: string[]) {
   }
 }
 
-function buildMailto(candidate: UnsubscribeCandidate) {
-  const raw = candidate.unsubscribeMailtos[0] ?? `mailto:${candidate.senderEmail}`;
-  const url = new URL(raw);
-  if (!url.searchParams.has("subject")) url.searchParams.set("subject", "Unsubscribe");
-  if (!url.searchParams.has("body")) {
-    url.searchParams.set(
-      "body",
-      `Please unsubscribe me from this mailing list.\n\nSender: ${candidate.sender}\nLatest subject: ${candidate.subject}`,
-    );
+async function collectThreadSummaries(threadIds: string[], accessToken: string): Promise<SenderInboxThread[]> {
+  const summaries: SenderInboxThread[] = [];
+
+  for (const threadId of threadIds) {
+    const thread = await gmailGet<{
+      id: string;
+      snippet?: string;
+      messages?: Array<{ snippet?: string; payload?: { headers?: Array<{ name?: string; value?: string }> } }>;
+    }>(`/users/me/threads/${encodeURIComponent(threadId)}?${new URLSearchParams({ format: "metadata" })}`, accessToken);
+    const latestMessage = thread.messages?.at(-1);
+
+    summaries.push({
+      threadId: thread.id,
+      subject: headerValue(latestMessage?.payload?.headers, "Subject"),
+      date: headerValue(latestMessage?.payload?.headers, "Date"),
+      snippet: latestMessage?.snippet ?? thread.snippet ?? "",
+    });
   }
-  return url.toString();
+
+  return summaries;
 }
 
-async function collectUnsubscribeCandidates(maxSenders = 10): Promise<UnsubscribeCandidate[]> {
+function formatThreadTitles(threads: SenderInboxThread[]) {
+  return threads.map((thread, index) => `${index + 1}. ${thread.subject || "(no subject)"}`).join("\n");
+}
+
+function formatCandidatePrompt(candidate: UnsubscribeCandidate) {
+  return [
+    `${candidate.senderEmail} — ${candidate.countInboxThreadsFromSender} inbox thread(s)`,
+    candidate.sender && candidate.sender !== candidate.senderEmail ? `From: ${candidate.sender}` : undefined,
+    `Newest unsubscribe email: ${candidate.subject || "(no subject)"}`,
+    "Inbox titles:",
+    formatThreadTitles(candidate.inboxThreads),
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function formatCandidateSummary(candidate: UnsubscribeCandidate) {
+  return [
+    `${candidate.senderEmail} — ${candidate.countInboxThreadsFromSender} inbox thread(s)`,
+    `Newest unsubscribe email: ${candidate.subject || "(no subject)"}`,
+    "Inbox titles:",
+    formatThreadTitles(candidate.inboxThreads),
+    candidate.chosenUrl ? `Unsubscribe: ${candidate.chosenUrl}` : "No HTTP unsubscribe URL found.",
+  ].join("\n");
+}
+
+async function collectUnsubscribeCandidates(maxSenders = 10, excludedSenders = new Set<string>()): Promise<UnsubscribeCandidate[]> {
   const accessToken = await getAccessToken();
   const list = await gmailGet<{ messages?: Array<{ id: string; threadId: string }> }>(
-    `/users/me/messages?${new URLSearchParams({ q: "in:inbox unsubscribe", maxResults: String(Math.min(maxSenders * 3, 50)) })}`,
+    `/users/me/messages?${new URLSearchParams({ q: "in:inbox unsubscribe", maxResults: String(Math.min(Math.max(maxSenders * 10, 50), 100)) })}`,
     accessToken,
   );
 
@@ -313,7 +356,7 @@ async function collectUnsubscribeCandidates(maxSenders = 10): Promise<Unsubscrib
 
     const from = headerValue(full.payload?.headers, "From");
     const email = senderEmail(from);
-    if (!email || seenSenders.has(email)) continue;
+    if (!email || seenSenders.has(email) || excludedSenders.has(email)) continue;
     seenSenders.add(email);
 
     const listUnsubscribe = headerValue(full.payload?.headers, "List-Unsubscribe");
@@ -326,6 +369,7 @@ async function collectUnsubscribeCandidates(maxSenders = 10): Promise<Unsubscrib
     );
     const matchingThreadIds = await listThreadIds(`in:inbox from:${email}`, accessToken);
     const archiveThreadIds = [full.threadId, ...matchingThreadIds].filter((id, index, ids) => ids.indexOf(id) === index);
+    const inboxThreads = await collectThreadSummaries(archiveThreadIds, accessToken);
 
     candidates.push({
       sender: from,
@@ -339,12 +383,13 @@ async function collectUnsubscribeCandidates(maxSenders = 10): Promise<Unsubscrib
       unsubscribeUrls,
       unsubscribeMailtos,
       chosenUrl: unsubscribeUrls[0],
+      inboxThreads,
       archiveThreadIds,
       countInboxThreadsFromSender: archiveThreadIds.length,
     });
   }
 
-  return candidates.sort((a, b) => b.countInboxThreadsFromSender - a.countInboxThreadsFromSender);
+  return candidates;
 }
 
 async function exchangeCodeForToken(code: string): Promise<GmailToken> {
@@ -480,17 +525,13 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (subcommand === "unsubscribe-candidates") {
-        ctx.ui.setStatus("email", "email: finding unsubscribe candidates…");
+        ctx.ui.setStatus("email", "email: finding newest unsubscribe senders…");
         try {
           const candidates = await collectUnsubscribeCandidates(10);
           ctx.ui.notify(
             candidates.length === 0
               ? "No unsubscribe candidates found."
-              : candidates
-                  .map((candidate) =>
-                    `${candidate.countInboxThreadsFromSender} inbox thread(s) — ${candidate.sender || candidate.senderEmail}: ${candidate.subject || "(no subject)"}\n${candidate.chosenUrl ? `  ${new URL(candidate.chosenUrl).host}` : candidate.unsubscribeMailtos[0] ? "  mailto unsubscribe available" : "  no unsubscribe URL found"}`,
-                  )
-                  .join("\n"),
+              : candidates.map(formatCandidateSummary).join("\n\n"),
             "info",
           );
         } catch (error) {
@@ -502,18 +543,21 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (subcommand === "unsubscribe-sweep") {
-        ctx.ui.setStatus("email", "email: finding unsubscribe candidates…");
-        try {
-          const candidates = await collectUnsubscribeCandidates(10);
-          if (candidates.length === 0) {
-            ctx.ui.notify("No unsubscribe candidates found.", "info");
-            return;
-          }
+        const skippedSenders = new Set<string>();
+        let considered = 0;
 
-          for (const [index, candidate] of candidates.entries()) {
-            ctx.ui.setStatus("email", `email: triaging ${index + 1}/${candidates.length}`);
-            const label = `${candidate.countInboxThreadsFromSender} inbox thread(s) — ${candidate.sender || candidate.senderEmail}\n${candidate.subject || "(no subject)"}`;
-            const choice = await ctx.ui.select(label, [
+        try {
+          while (true) {
+            ctx.ui.setStatus("email", "email: finding newest unsubscribe sender…");
+            const [candidate] = await collectUnsubscribeCandidates(1, skippedSenders);
+            if (!candidate) {
+              ctx.ui.notify(considered === 0 ? "No unsubscribe candidates found." : "unsubscribe sweep complete", "info");
+              return;
+            }
+
+            considered++;
+            ctx.ui.setStatus("email", `email: triaging ${candidate.senderEmail}`);
+            const choice = await ctx.ui.select(formatCandidatePrompt(candidate), [
               "1. Unsubscribe and archive all",
               "2. Archive-only",
               "3. Skip",
@@ -525,19 +569,14 @@ export default function (pi: ExtensionAPI) {
               return;
             }
 
-            if (choice.startsWith("3.")) continue;
+            if (choice.startsWith("3.")) {
+              skippedSenders.add(candidate.senderEmail);
+              continue;
+            }
 
             if (choice.startsWith("1.")) {
-              if (candidate.chosenUrl) {
-                await execFileAsync("open", [candidate.chosenUrl]);
-                const didUnsubscribe = await ctx.ui.confirm(
-                  "Were you able to unsubscribe?",
-                  "Yes archives this sender now. No opens a prefilled mailto unsubscribe request, then archives this sender.",
-                );
-                if (!didUnsubscribe) await execFileAsync("open", [buildMailto(candidate)]);
-              } else {
-                await execFileAsync("open", [buildMailto(candidate)]);
-              }
+              if (candidate.chosenUrl) await execFileAsync("open", [candidate.chosenUrl]);
+              else ctx.ui.notify(`No HTTP unsubscribe link found for ${candidate.senderEmail}. Archiving only.`, "warning");
             }
 
             ctx.ui.setStatus("email", `email: archiving ${candidate.countInboxThreadsFromSender} thread(s) from ${candidate.senderEmail}…`);
@@ -570,7 +609,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      ctx.ui.notify(`unknown email command: ${subcommand}`, "warn");
+      ctx.ui.notify(`unknown email command: ${subcommand}`, "warning");
     },
   });
 
@@ -614,12 +653,7 @@ export default function (pi: ExtensionAPI) {
             text:
               candidates.length === 0
                 ? "No unsubscribe candidates found."
-                : candidates
-                    .map(
-                      (candidate) =>
-                        `- ${candidate.countInboxThreadsFromSender} inbox thread(s) — ${candidate.sender || candidate.senderEmail}: ${candidate.subject || "(no subject)"}\n  ${candidate.chosenUrl ?? candidate.unsubscribeMailtos[0] ?? "No unsubscribe URL found."}`,
-                    )
-                    .join("\n"),
+                : candidates.map(formatCandidateSummary).join("\n\n"),
           },
         ],
         details: { count: candidates.length, candidates },
