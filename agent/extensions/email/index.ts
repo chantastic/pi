@@ -22,6 +22,7 @@ type EmailAction =
   | "trash"
   | "spam"
   | "archiveSimilar"
+  | "trashSimilar"
   | "unsubscribeArchive"
   | "skip"
   | "escape";
@@ -30,13 +31,14 @@ const EMAIL_ACTIONS: Record<EmailAction, { label: string; keys: string[] }> = {
   archive: { label: "Archive", keys: ["Return", "e"] },
   trash: { label: "Trash", keys: ["#"] },
   spam: { label: "Spam", keys: ["!"] },
-  archiveSimilar: { label: "Archive other messages like this", keys: ["v"] },
+  archiveSimilar: { label: "Archive messages like this", keys: ["E"] },
+  trashSimilar: { label: "Trash messages like this", keys: ["T"] },
   unsubscribeArchive: { label: "Unsubscribe and archive", keys: ["Return"] },
   skip: { label: "Skip", keys: ["j"] },
   escape: { label: "Escape", keys: ["q", "Esc"] },
 };
 
-const INBOX_SWEEP_ACTIONS: EmailAction[] = ["archive", "trash", "spam", "archiveSimilar", "skip", "escape"];
+const INBOX_SWEEP_ACTIONS: EmailAction[] = ["archive", "archiveSimilar", "trash", "trashSimilar", "spam", "skip", "escape"];
 const UNSUBSCRIBE_SWEEP_ACTIONS: EmailAction[] = ["unsubscribeArchive", "archive", "spam", "trash", "skip", "escape"];
 
 type GmailToken = {
@@ -195,7 +197,8 @@ function actionForKey(data: string, actions: EmailAction[]): EmailAction | undef
   if (data === "e" && actions.includes("archive")) return "archive";
   if (data === "#" && actions.includes("trash")) return "trash";
   if (data === "!" && actions.includes("spam")) return "spam";
-  if (data === "v" && actions.includes("archiveSimilar")) return "archiveSimilar";
+  if (data === "E" && actions.includes("archiveSimilar")) return "archiveSimilar";
+  if (data === "T" && actions.includes("trashSimilar")) return "trashSimilar";
   return undefined;
 }
 
@@ -818,6 +821,15 @@ export default function (pi: ExtensionAPI) {
               ctx.ui.setStatus("email", `email: archiving ${threadIds.length} similar thread(s)…`);
               await archiveThreadIds(threadIds);
               ctx.ui.notify(`archived ${threadIds.length} similar inbox thread(s) using query: ${query}`, "info");
+              continue;
+            }
+
+            if (choice === "trashSimilar") {
+              ctx.ui.setStatus("email", `email: finding messages like ${item.senderEmail || "this"}…`);
+              const { query, threadIds } = await collectSimilarInboxThreadIds(item);
+              ctx.ui.setStatus("email", `email: moving ${threadIds.length} similar thread(s) to trash…`);
+              await trashThreadIds(threadIds);
+              ctx.ui.notify(`moved ${threadIds.length} similar inbox thread(s) to trash using query: ${query}`, "info");
             }
           }
         } catch (error) {

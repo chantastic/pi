@@ -61,13 +61,14 @@ http://127.0.0.1:53682/oauth2/callback
 - Long-running commands show an `email:` footer status while loading candidates, triaging, archiving, moving to spam, or moving to trash.
 - `/email inbox-sweep` repeatedly finds the newest inbox email, shows sender, full subject, and a local text excerpt, then accepts Gmail-like shortcuts:
   - `Return` / `e` — Archive
+  - `E` — Archive messages like this
   - `#` — Trash
+  - `T` — Trash messages like this
   - `!` — Spam
-  - `v` — Archive other messages like this
   - `j` — Skip
   - `q` / `Esc` — Escape
   - `?` — Toggle shortcut legend
-- Archive other messages like this builds a Gmail search from the sender plus up to four meaningful subject keywords, then archives the matching inbox threads.
+- Archive/Trash messages like this builds a Gmail search from the sender plus up to four meaningful subject keywords, then archives or trashes the matching inbox threads.
 - `/email unsubscribe-sweep` repeatedly finds the newest inbox email containing unsubscribe text, queries all matching inbox threads from that sender, shows the sender email plus thread titles, then accepts Gmail-like shortcuts:
   - `Return` — Unsubscribe and archive all
   - `e` — Archive-only
