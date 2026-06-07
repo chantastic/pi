@@ -459,12 +459,20 @@ async function listThreadIds(query: string, accessToken: string): Promise<string
   return ids;
 }
 
+async function markThreadIdsRead(threadIds: string[], accessToken: string) {
+  for (const threadId of threadIds) {
+    await gmailPost(`/users/me/threads/${encodeURIComponent(threadId)}/modify`, accessToken, {
+      removeLabelIds: ["UNREAD"],
+    });
+  }
+}
+
 async function archiveThreadIds(threadIds: string[]) {
   if (threadIds.length === 0) return;
   const accessToken = await getAccessToken();
   for (const threadId of threadIds) {
     await gmailPost(`/users/me/threads/${encodeURIComponent(threadId)}/modify`, accessToken, {
-      removeLabelIds: ["INBOX"],
+      removeLabelIds: ["INBOX", "UNREAD"],
     });
   }
 }
@@ -475,7 +483,7 @@ async function spamThreadIds(threadIds: string[]) {
   for (const threadId of threadIds) {
     await gmailPost(`/users/me/threads/${encodeURIComponent(threadId)}/modify`, accessToken, {
       addLabelIds: ["SPAM"],
-      removeLabelIds: ["INBOX"],
+      removeLabelIds: ["INBOX", "UNREAD"],
     });
   }
 }
@@ -483,6 +491,7 @@ async function spamThreadIds(threadIds: string[]) {
 async function trashThreadIds(threadIds: string[]) {
   if (threadIds.length === 0) return;
   const accessToken = await getAccessToken();
+  await markThreadIdsRead(threadIds, accessToken);
   for (const threadId of threadIds) {
     await gmailPost(`/users/me/threads/${encodeURIComponent(threadId)}/trash`, accessToken, {});
   }

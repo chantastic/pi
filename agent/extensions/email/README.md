@@ -79,7 +79,7 @@ http://127.0.0.1:53682/oauth2/callback
   - `j` — Skip
   - `q` / `Esc` — Escape
   - `?` — Toggle shortcut legend
-- Spam all applies Gmail's `SPAM` label and removes `INBOX` from the matching threads. Trash all moves matching threads to Gmail Trash. Skip leaves that sender untouched for this run and moves to the next candidate. Escape stops the sweep.
+- Archive, spam, and trash actions remove `UNREAD` so affected threads are marked read while leaving the inbox. Spam all applies Gmail's `SPAM` label and removes `INBOX` from the matching threads. Trash all moves matching threads to Gmail Trash. Skip leaves that sender untouched for this run and moves to the next candidate. Escape stops the sweep.
 - Choosing unsubscribe opens the HTTP unsubscribe link in the local browser when available, then archives the matching inbox threads. It does not ask for confirmation or fall back to `mailto:` yet.
 - The extension never fetches unsubscribe URLs server-side, clicks through pages, or sends mail. Archive/spam/trash actions run only after an explicit sweep choice.
 - Archive targets always include the candidate's latest thread plus all inbox threads matching the sender email. This avoids leaving the selected sender visible when Gmail's thread UI and message-level searches disagree.
