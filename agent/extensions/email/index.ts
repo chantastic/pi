@@ -512,52 +512,23 @@ async function collectNewestInboxSweepItem(excludedThreadIds = new Set<string>()
   return null;
 }
 
-const INBOX_SUMMARY_SYSTEM_PROMPT = `You summarize emails for fast inbox triage. Return exactly one concise sentence. Do not include a preamble.`;
+function firstReadableExcerpt(item: InboxSweepItem) {
+  const text = (item.bodyText || item.snippet || "").trim();
+  if (!text) return "No preview text.";
 
-function fallbackInboxSummary(item: InboxSweepItem) {
-  const base = item.snippet || item.bodyText || item.subject || "No preview text.";
-  return `${item.senderEmail || item.from || "Unknown sender"} sent ${item.subject ? `“${item.subject}”` : "an email"}: ${base}`
-    .replace(/\s+/g, " ")
-    .slice(0, 240);
+  const paragraph = text.split(/\n\s*\n/).find((part) => part.trim()) ?? text;
+  const sentence = paragraph.match(/^.{40,}?[.!?](?:\s|$)/)?.[0] ?? paragraph;
+  return sentence.replace(/\s+/g, " ").trim().slice(0, 700);
 }
 
-async function summarizeInboxSweepItem(item: InboxSweepItem, signal?: AbortSignal) {
-  try {
-    const response = await fetch(`${OLLAMA_API_BASE}/api/chat`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        model: OLLAMA_EMAIL_MODEL,
-        keep_alive: OLLAMA_KEEP_ALIVE,
-        stream: false,
-        messages: [
-          { role: "system", content: INBOX_SUMMARY_SYSTEM_PROMPT },
-          {
-            role: "user",
-            content: [
-              `From: ${item.from}`,
-              `Subject: ${item.subject}`,
-              `Date: ${item.date}`,
-              `Snippet: ${item.snippet}`,
-              `Body excerpt: ${item.bodyText.slice(0, 4000)}`,
-            ].join("\n"),
-          },
-        ],
-      }),
-      signal,
-    });
-
-    if (!response.ok) return fallbackInboxSummary(item);
-    const data = (await response.json()) as { message?: { content?: string } };
-    const text = (data.message?.content ?? "")
-      .replace(/<think>[\s\S]*?<\/think>/gi, "")
-      .replace(/\s+/g, " ")
-      .trim();
-
-    return text || fallbackInboxSummary(item);
-  } catch {
-    return fallbackInboxSummary(item);
-  }
+function formatInboxSweepPrompt(item: InboxSweepItem) {
+  return [
+    item.from || item.senderEmail || "unknown sender",
+    "",
+    item.subject || "(no subject)",
+    "",
+    firstReadableExcerpt(item),
+  ].join("\n");
 }
 
 const SUBJECT_STOPWORDS = new Set([
@@ -802,21 +773,11 @@ export default function (pi: ExtensionAPI) {
             }
 
             considered++;
-            ctx.ui.setStatus("email", `email: summarizing ${item.senderEmail || item.from || "email"}…`);
-            const summary = await summarizeInboxSweepItem(item, ctx.signal);
             ctx.ui.setStatus("email", `email: triaging ${item.senderEmail || item.from || "email"}`);
             const choice = await chooseEmailAction(
               ctx,
               "Inbox sweep",
-              [
-                item.senderEmail || item.from || "unknown sender",
-                item.from && item.from !== item.senderEmail ? `From: ${item.from}` : undefined,
-                `Subject: ${item.subject || "(no subject)"}`,
-                `Summary: ${summary}`,
-                item.snippet ? `Snippet: ${item.snippet}` : undefined,
-              ]
-                .filter(Boolean)
-                .join("\n"),
+              formatInboxSweepPrompt(item),
               INBOX_SWEEP_ACTIONS,
             );
 
