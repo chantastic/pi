@@ -277,29 +277,67 @@ function gmailSearchUrl(query: string) {
   return `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
 }
 
-async function confirmBulkAction(ctx: any, actionLabel: string, query: string, summaries: SenderInboxThread[]) {
-  return await ctx.ui.custom<boolean>((_tui: unknown, theme: any, _keybindings: unknown, done: (value: boolean) => void) => ({
-    render(width: number) {
-      return boxedLines(
-        `Confirm ${actionLabel}`,
-        [
-          `Query: ${query}`,
-          `Link: ${gmailSearchUrl(query)}`,
-          "",
-          "Threads included:",
-          ...summaries.map((summary, index) => `${index + 1}. ${summary.subject || "(no subject)"}`),
-        ],
-        "Return Confirm  ·  Esc Cancel and next",
-        width,
-        theme,
-      );
-    },
-    handleInput(data: string) {
-      if (matchesKey(data, Key.enter)) done(true);
-      if (matchesKey(data, Key.escape)) done(false);
-    },
-    invalidate() {},
-  }), emailOverlayOptions());
+async function confirmBulkAction(ctx: any, actionLabel: string, item: InboxSweepItem) {
+  type BulkSelection = Awaited<ReturnType<typeof collectSimilarInboxSelection>>;
+  type BulkResult = { confirmed: true; selection: BulkSelection } | { confirmed: false };
+  const queries = [similarInboxQuery(item), broadSimilarInboxQuery(item)].filter((query, index, list) => list.indexOf(query) === index);
+
+  return await ctx.ui.custom<BulkResult>((tui: { requestRender: () => void }, theme: any, _keybindings: unknown, done: (value: BulkResult) => void) => {
+    let queryIndex = 0;
+    let selection: BulkSelection | null = null;
+    let loading = "Loading matching threads…";
+
+    const load = async () => {
+      const query = queries[queryIndex] ?? queries[0]!;
+      loading = `Loading matches for: ${query}`;
+      selection = null;
+      tui.requestRender();
+      try {
+        selection = await collectSimilarInboxSelection(item, query);
+        loading = "";
+      } catch (error) {
+        loading = `Failed to load matches: ${error instanceof Error ? error.message : String(error)}`;
+      }
+      tui.requestRender();
+    };
+
+    setTimeout(() => void load(), 0);
+
+    return {
+      render(width: number) {
+        const query = queries[queryIndex] ?? queries[0]!;
+        return boxedLines(
+          `Confirm ${actionLabel}`,
+          [
+            `Query: ${query}`,
+            `Link: ${gmailSearchUrl(query)}`,
+            `Mode: ${queryIndex === 0 ? "filtered by subject" : "expanded to sender"}`,
+            "",
+            selection ? `Threads included (${selection.threadIds.length}):` : loading,
+            ...(selection?.summaries.map((summary, index) => `${index + 1}. ${summary.subject || "(no subject)"}`) ?? []),
+          ],
+          "+ Expand  ·  - Filter  ·  Return Confirm  ·  Esc Cancel and next",
+          width,
+          theme,
+        );
+      },
+      handleInput(data: string) {
+        if (data === "+" && queryIndex < queries.length - 1) {
+          queryIndex++;
+          void load();
+          return;
+        }
+        if (data === "-" && queryIndex > 0) {
+          queryIndex--;
+          void load();
+          return;
+        }
+        if (matchesKey(data, Key.enter) && selection) done({ confirmed: true, selection });
+        if (matchesKey(data, Key.escape)) done({ confirmed: false });
+      },
+      invalidate() {},
+    };
+  }, emailOverlayOptions());
 }
 
 function emailOverlayOptions() {
@@ -637,9 +675,12 @@ function similarInboxQuery(item: InboxSweepItem) {
   return [`in:inbox`, `from:${item.senderEmail}`, subjectTerms].filter(Boolean).join(" ");
 }
 
-async function collectSimilarInboxThreadIds(item: InboxSweepItem) {
+function broadSimilarInboxQuery(item: InboxSweepItem) {
+  return [`in:inbox`, `from:${item.senderEmail}`].filter(Boolean).join(" ");
+}
+
+async function collectSimilarInboxSelection(item: InboxSweepItem, query: string) {
   const accessToken = await getAccessToken();
-  const query = similarInboxQuery(item);
   const threadIds = await listThreadIds(query, accessToken);
   const uniqueThreadIds = [item.threadId, ...threadIds].filter((threadId, index, ids) => ids.indexOf(threadId) === index);
   return {
@@ -791,14 +832,14 @@ async function runInboxSweep(ctx: any) {
           processing = true;
           message = `Finding messages like ${current.senderEmail || "this"}…`;
           tui.requestRender();
-          const { query, threadIds, summaries } = await collectSimilarInboxThreadIds(current);
           const isTrash = choice === "trashSimilar";
-          const confirmed = await confirmBulkAction(ctx, isTrash ? "trash messages like this" : "archive messages like this", query, summaries);
-          if (!confirmed) {
+          const result = await confirmBulkAction(ctx, isTrash ? "trash messages like this" : "archive messages like this", current);
+          if (!result.confirmed) {
             skippedThreadIds.add(current.threadId);
             await showNext(true);
             return;
           }
+          const { query, threadIds } = result.selection;
           message = `${isTrash ? "Moving" : "Archiving"} ${threadIds.length} similar thread(s)…`;
           tui.requestRender();
           if (isTrash) await trashThreadIds(threadIds);
