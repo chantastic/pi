@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
@@ -15,6 +16,28 @@ const GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1";
 const OLLAMA_API_BASE = process.env.PI_EMAIL_OLLAMA_URL ?? "http://localhost:11434";
 const OLLAMA_EMAIL_MODEL = process.env.PI_EMAIL_OLLAMA_MODEL ?? "qwen3:8b";
 const OLLAMA_KEEP_ALIVE = process.env.PI_EMAIL_OLLAMA_KEEP_ALIVE ?? "30m";
+
+type EmailAction =
+  | "archive"
+  | "trash"
+  | "spam"
+  | "archiveSimilar"
+  | "unsubscribeArchive"
+  | "skip"
+  | "escape";
+
+const EMAIL_ACTIONS: Record<EmailAction, { label: string; keys: string[] }> = {
+  archive: { label: "Archive", keys: ["Return", "e"] },
+  trash: { label: "Trash", keys: ["#"] },
+  spam: { label: "Spam", keys: ["!"] },
+  archiveSimilar: { label: "Archive other messages like this", keys: ["v"] },
+  unsubscribeArchive: { label: "Unsubscribe and archive", keys: ["Return"] },
+  skip: { label: "Skip", keys: ["j"] },
+  escape: { label: "Escape", keys: ["q", "Esc"] },
+};
+
+const INBOX_SWEEP_ACTIONS: EmailAction[] = ["archive", "trash", "spam", "archiveSimilar", "skip", "escape"];
+const UNSUBSCRIBE_SWEEP_ACTIONS: EmailAction[] = ["unsubscribeArchive", "archive", "spam", "trash", "skip", "escape"];
 
 type GmailToken = {
   access_token?: string;
@@ -159,6 +182,73 @@ function formatGmailApiError(status: number, body: string) {
     ? " Run /email auth to grant the current Gmail scopes."
     : "";
   return `Gmail API failed: ${status} ${body}${reauthHint}`;
+}
+
+function actionLegend(actions: EmailAction[]) {
+  return actions.map((action) => `${EMAIL_ACTIONS[action].keys.join("/")} ${EMAIL_ACTIONS[action].label}`).join("  ·  ");
+}
+
+function actionForKey(data: string, actions: EmailAction[]): EmailAction | undefined {
+  if (matchesKey(data, Key.enter)) return actions.includes("unsubscribeArchive") ? "unsubscribeArchive" : "archive";
+  if (matchesKey(data, Key.escape) || data === "q") return "escape";
+  if (data === "j") return "skip";
+  if (data === "e" && actions.includes("archive")) return "archive";
+  if (data === "#" && actions.includes("trash")) return "trash";
+  if (data === "!" && actions.includes("spam")) return "spam";
+  if (data === "v" && actions.includes("archiveSimilar")) return "archiveSimilar";
+  return undefined;
+}
+
+async function chooseEmailAction(
+  ctx: any,
+  title: string,
+  body: string,
+  actions: EmailAction[],
+): Promise<EmailAction> {
+  return await ctx.ui.custom<EmailAction>((tui: { requestRender: () => void }, theme: any, _keybindings: unknown, done: (value: EmailAction) => void) => {
+    let showHelp = false;
+    const render = (width: number) => {
+      const lines = [
+        theme?.fg ? theme.fg("accent", title) : title,
+        "",
+        ...body.split("\n"),
+        "",
+        actionLegend(actions),
+      ];
+      if (showHelp) {
+        lines.push("", "Shortcuts:");
+        for (const action of actions) lines.push(`  ${EMAIL_ACTIONS[action].keys.join(" / ")} — ${EMAIL_ACTIONS[action].label}`);
+        lines.push("  ? — Toggle this legend");
+      } else {
+        lines.push("? for shortcuts");
+      }
+      return lines.flatMap((line) => {
+        if (!line) return [""];
+        const chunks: string[] = [];
+        let rest = line;
+        while (rest.length > width) {
+          chunks.push(truncateToWidth(rest, width));
+          rest = rest.slice(width);
+        }
+        chunks.push(truncateToWidth(rest, width));
+        return chunks;
+      });
+    };
+
+    return {
+      render,
+      handleInput(data: string) {
+        if (data === "?") {
+          showHelp = !showHelp;
+          tui.requestRender();
+          return;
+        }
+        const action = actionForKey(data, actions);
+        if (action) done(action);
+      },
+      invalidate() {},
+    };
+  });
 }
 
 async function gmailRequest<T>(method: "GET" | "POST", path: string, accessToken: string, body?: unknown): Promise<T> {
@@ -715,7 +805,9 @@ export default function (pi: ExtensionAPI) {
             ctx.ui.setStatus("email", `email: summarizing ${item.senderEmail || item.from || "email"}…`);
             const summary = await summarizeInboxSweepItem(item, ctx.signal);
             ctx.ui.setStatus("email", `email: triaging ${item.senderEmail || item.from || "email"}`);
-            const choice = await ctx.ui.select(
+            const choice = await chooseEmailAction(
+              ctx,
+              "Inbox sweep",
               [
                 item.senderEmail || item.from || "unknown sender",
                 item.from && item.from !== item.senderEmail ? `From: ${item.from}` : undefined,
@@ -725,41 +817,41 @@ export default function (pi: ExtensionAPI) {
               ]
                 .filter(Boolean)
                 .join("\n"),
-              ["1. Archive", "2. Trash", "3. Spam", "4. Archive other messages like this", "5. Skip", "6. Escape"],
+              INBOX_SWEEP_ACTIONS,
             );
 
-            if (!choice || choice.startsWith("6.")) {
+            if (choice === "escape") {
               ctx.ui.notify("inbox sweep stopped", "info");
               return;
             }
 
-            if (choice.startsWith("5.")) {
+            if (choice === "skip") {
               skippedThreadIds.add(item.threadId);
               continue;
             }
 
-            if (choice.startsWith("1.")) {
+            if (choice === "archive") {
               ctx.ui.setStatus("email", `email: archiving ${item.senderEmail || "thread"}…`);
               await archiveThreadIds([item.threadId]);
               ctx.ui.notify(`archived ${item.senderEmail || item.threadId}`, "info");
               continue;
             }
 
-            if (choice.startsWith("2.")) {
+            if (choice === "trash") {
               ctx.ui.setStatus("email", `email: moving ${item.senderEmail || "thread"} to trash…`);
               await trashThreadIds([item.threadId]);
               ctx.ui.notify(`moved ${item.senderEmail || item.threadId} to trash`, "info");
               continue;
             }
 
-            if (choice.startsWith("3.")) {
+            if (choice === "spam") {
               ctx.ui.setStatus("email", `email: moving ${item.senderEmail || "thread"} to spam…`);
               await spamThreadIds([item.threadId]);
               ctx.ui.notify(`moved ${item.senderEmail || item.threadId} to spam`, "info");
               continue;
             }
 
-            if (choice.startsWith("4.")) {
+            if (choice === "archiveSimilar") {
               ctx.ui.setStatus("email", `email: finding messages like ${item.senderEmail || "this"}…`);
               const { query, threadIds } = await collectSimilarInboxThreadIds(item);
               ctx.ui.setStatus("email", `email: archiving ${threadIds.length} similar thread(s)…`);
@@ -808,38 +900,31 @@ export default function (pi: ExtensionAPI) {
 
             considered++;
             ctx.ui.setStatus("email", `email: triaging ${candidate.senderEmail}`);
-            const choice = await ctx.ui.select(formatCandidatePrompt(candidate), [
-              "1. Unsubscribe and archive all",
-              "2. Archive-only",
-              "3. Spam all",
-              "4. Trash all",
-              "5. Skip",
-              "6. Escape",
-            ]);
+            const choice = await chooseEmailAction(ctx, "Unsubscribe sweep", formatCandidatePrompt(candidate), UNSUBSCRIBE_SWEEP_ACTIONS);
 
-            if (!choice || choice.startsWith("6.")) {
+            if (choice === "escape") {
               ctx.ui.notify("unsubscribe sweep stopped", "info");
               return;
             }
 
-            if (choice.startsWith("5.")) {
+            if (choice === "skip") {
               skippedSenders.add(candidate.senderEmail);
               continue;
             }
 
-            if (choice.startsWith("1.")) {
+            if (choice === "unsubscribeArchive") {
               if (candidate.chosenUrl) await execFileAsync("open", [candidate.chosenUrl]);
               else ctx.ui.notify(`No HTTP unsubscribe link found for ${candidate.senderEmail}. Archiving only.`, "warning");
             }
 
-            if (choice.startsWith("3.")) {
+            if (choice === "spam") {
               ctx.ui.setStatus("email", `email: moving ${candidate.countInboxThreadsFromSender} thread(s) from ${candidate.senderEmail} to spam…`);
               await spamThreadIds(candidate.archiveThreadIds);
               ctx.ui.notify(`moved ${candidate.countInboxThreadsFromSender} inbox thread(s) from ${candidate.senderEmail} to spam`, "info");
               continue;
             }
 
-            if (choice.startsWith("4.")) {
+            if (choice === "trash") {
               ctx.ui.setStatus("email", `email: moving ${candidate.countInboxThreadsFromSender} thread(s) from ${candidate.senderEmail} to trash…`);
               await trashThreadIds(candidate.archiveThreadIds);
               ctx.ui.notify(`moved ${candidate.countInboxThreadsFromSender} inbox thread(s) from ${candidate.senderEmail} to trash`, "info");

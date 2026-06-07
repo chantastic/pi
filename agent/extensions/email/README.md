@@ -59,21 +59,23 @@ http://127.0.0.1:53682/oauth2/callback
 - `/email inbox-sweep` fetches the full current message so it can produce a one-sentence summary. Summaries are sent to local Ollama only (`qwen3:8b` by default at `http://localhost:11434`) with `keep_alive: 30m`; if Ollama is unavailable, it falls back to a local snippet summary.
 - Unsubscribe candidate collection fetches full latest messages only to extract unsubscribe headers/body links.
 - Long-running commands show an `email:` footer status while loading candidates, summarizing, triaging, archiving, moving to spam, or moving to trash.
-- `/email inbox-sweep` repeatedly finds the newest inbox email, shows sender/subject/snippet plus a one-sentence summary, then asks for one of:
-  1. Archive
-  2. Trash
-  3. Spam
-  4. Archive other messages like this
-  5. Skip
-  6. Escape
+- `/email inbox-sweep` repeatedly finds the newest inbox email, shows sender/subject/snippet plus a one-sentence summary, then accepts Gmail-like shortcuts:
+  - `Return` / `e` — Archive
+  - `#` — Trash
+  - `!` — Spam
+  - `v` — Archive other messages like this
+  - `j` — Skip
+  - `q` / `Esc` — Escape
+  - `?` — Toggle shortcut legend
 - Archive other messages like this builds a Gmail search from the sender plus up to four meaningful subject keywords, then archives the matching inbox threads.
-- `/email unsubscribe-sweep` repeatedly finds the newest inbox email containing unsubscribe text, queries all matching inbox threads from that sender, shows the sender email plus thread titles, then asks for one of:
-  1. Unsubscribe and archive all
-  2. Archive-only
-  3. Spam all
-  4. Trash all
-  5. Skip
-  6. Escape
+- `/email unsubscribe-sweep` repeatedly finds the newest inbox email containing unsubscribe text, queries all matching inbox threads from that sender, shows the sender email plus thread titles, then accepts Gmail-like shortcuts:
+  - `Return` — Unsubscribe and archive all
+  - `e` — Archive-only
+  - `!` — Spam all
+  - `#` — Trash all
+  - `j` — Skip
+  - `q` / `Esc` — Escape
+  - `?` — Toggle shortcut legend
 - Spam all applies Gmail's `SPAM` label and removes `INBOX` from the matching threads. Trash all moves matching threads to Gmail Trash. Skip leaves that sender untouched for this run and moves to the next candidate. Escape stops the sweep.
 - Choosing unsubscribe opens the HTTP unsubscribe link in the local browser when available, then archives the matching inbox threads. It does not ask for confirmation or fall back to `mailto:` yet.
 - The extension never fetches unsubscribe URLs server-side, clicks through pages, or sends mail. Archive/spam/trash actions run only after an explicit sweep choice.
