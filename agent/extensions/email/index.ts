@@ -267,17 +267,7 @@ async function chooseEmailAction(
       },
       invalidate() {},
     };
-  }, {
-    overlay: true,
-    overlayOptions: {
-      width: "100%",
-      maxHeight: "100%",
-      anchor: "top-left",
-      row: 0,
-      col: 0,
-      margin: 0,
-    },
-  });
+  }, emailOverlayOptions());
 }
 
 function gmailSearchUrl(query: string) {
@@ -306,7 +296,11 @@ async function confirmBulkAction(ctx: any, actionLabel: string, query: string, s
       if (matchesKey(data, Key.escape)) done(false);
     },
     invalidate() {},
-  }), {
+  }), emailOverlayOptions());
+}
+
+function emailOverlayOptions() {
+  return {
     overlay: true,
     overlayOptions: {
       width: "100%",
@@ -316,7 +310,7 @@ async function confirmBulkAction(ctx: any, actionLabel: string, query: string, s
       col: 0,
       margin: 0,
     },
-  });
+  };
 }
 
 async function gmailRequest<T>(method: "GET" | "POST", path: string, accessToken: string, body?: unknown): Promise<T> {
@@ -699,6 +693,128 @@ async function collectUnsubscribeCandidates(maxSenders = 10, excludedSenders = n
   return candidates;
 }
 
+async function runInboxSweep(ctx: any) {
+  await ctx.ui.custom<void>((tui: { requestRender: () => void }, theme: any, _kb: unknown, done: () => void) => {
+    const skippedThreadIds = new Set<string>();
+    let item: InboxSweepItem | null = null;
+    let nextItemPromise: Promise<InboxSweepItem | null> | null = null;
+    let considered = 0;
+    let processing = false;
+    let message = "Loading newest inbox email…";
+
+    const excludedForNext = () => {
+      const excluded = new Set(skippedThreadIds);
+      if (item) excluded.add(item.threadId);
+      return excluded;
+    };
+
+    const prefetchNext = () => {
+      nextItemPromise = collectNewestInboxSweepItem(excludedForNext()).catch((error) => {
+        message = `Prefetch failed: ${error instanceof Error ? error.message : String(error)}`;
+        tui.requestRender();
+        return null;
+      });
+    };
+
+    const showNext = async (usePrefetch: boolean) => {
+      processing = true;
+      message = "Loading next inbox email…";
+      tui.requestRender();
+      item = usePrefetch && nextItemPromise ? await nextItemPromise : await collectNewestInboxSweepItem(skippedThreadIds);
+      processing = false;
+      if (!item) {
+        ctx.ui.notify(considered === 0 ? "No inbox emails found." : "inbox sweep complete", "info");
+        done();
+        return;
+      }
+      considered++;
+      message = `Triaging ${item.senderEmail || item.from || "email"}`;
+      ctx.ui.setStatus("email", `email: ${message.toLowerCase()}`);
+      prefetchNext();
+      tui.requestRender();
+    };
+
+    const act = async (choice: EmailAction) => {
+      if (processing || !item) return;
+      if (choice === "escape") {
+        ctx.ui.notify("inbox sweep stopped", "info");
+        done();
+        return;
+      }
+      const current = item;
+      try {
+        if (choice === "skip") {
+          skippedThreadIds.add(current.threadId);
+          await showNext(true);
+          return;
+        }
+        if (choice === "archive") {
+          processing = true;
+          message = `Archiving ${current.senderEmail || "thread"}…`;
+          tui.requestRender();
+          await archiveThreadIds([current.threadId]);
+          await showNext(true);
+          return;
+        }
+        if (choice === "trash") {
+          processing = true;
+          message = `Moving ${current.senderEmail || "thread"} to trash…`;
+          tui.requestRender();
+          await trashThreadIds([current.threadId]);
+          await showNext(true);
+          return;
+        }
+        if (choice === "spam") {
+          processing = true;
+          message = `Moving ${current.senderEmail || "thread"} to spam…`;
+          tui.requestRender();
+          await spamThreadIds([current.threadId]);
+          await showNext(true);
+          return;
+        }
+        if (choice === "archiveSimilar" || choice === "trashSimilar") {
+          processing = true;
+          message = `Finding messages like ${current.senderEmail || "this"}…`;
+          tui.requestRender();
+          const { query, threadIds, summaries } = await collectSimilarInboxThreadIds(current);
+          const isTrash = choice === "trashSimilar";
+          const confirmed = await confirmBulkAction(ctx, isTrash ? "trash messages like this" : "archive messages like this", query, summaries);
+          if (!confirmed) {
+            skippedThreadIds.add(current.threadId);
+            await showNext(true);
+            return;
+          }
+          message = `${isTrash ? "Moving" : "Archiving"} ${threadIds.length} similar thread(s)…`;
+          tui.requestRender();
+          if (isTrash) await trashThreadIds(threadIds);
+          else await archiveThreadIds(threadIds);
+          ctx.ui.notify(`${isTrash ? "moved" : "archived"} ${threadIds.length} similar inbox thread(s) using query: ${query}`, "info");
+          await showNext(false);
+        }
+      } catch (error) {
+        message = `Action failed: ${error instanceof Error ? error.message : String(error)}`;
+        processing = false;
+        tui.requestRender();
+      }
+    };
+
+    setTimeout(() => void showNext(false), 0);
+
+    return {
+      render(width: number) {
+        const body = item ? formatInboxSweepPrompt(item).split("\n") : [message];
+        if (processing) body.push("", theme?.fg ? theme.fg("muted", message) : message);
+        return boxedLines("Inbox sweep", body, `${actionLegend(INBOX_SWEEP_ACTIONS)}  ·  ? Help`, width, theme);
+      },
+      handleInput(data: string) {
+        const action = actionForKey(data, INBOX_SWEEP_ACTIONS);
+        if (action) void act(action);
+      },
+      invalidate() {},
+    };
+  }, emailOverlayOptions());
+}
+
 async function exchangeCodeForToken(code: string): Promise<GmailToken> {
   const { clientId, clientSecret } = await getGoogleClientConfig();
   const body = new URLSearchParams({
@@ -832,85 +948,8 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (subcommand === "inbox-sweep") {
-        const skippedThreadIds = new Set<string>();
-        let considered = 0;
-
         try {
-          while (true) {
-            ctx.ui.setStatus("email", "email: finding newest inbox email…");
-            const item = await collectNewestInboxSweepItem(skippedThreadIds);
-            if (!item) {
-              ctx.ui.notify(considered === 0 ? "No inbox emails found." : "inbox sweep complete", "info");
-              return;
-            }
-
-            considered++;
-            ctx.ui.setStatus("email", `email: triaging ${item.senderEmail || item.from || "email"}`);
-            const choice = await chooseEmailAction(
-              ctx,
-              "Inbox sweep",
-              formatInboxSweepPrompt(item),
-              INBOX_SWEEP_ACTIONS,
-            );
-
-            if (choice === "escape") {
-              ctx.ui.notify("inbox sweep stopped", "info");
-              return;
-            }
-
-            if (choice === "skip") {
-              skippedThreadIds.add(item.threadId);
-              continue;
-            }
-
-            if (choice === "archive") {
-              ctx.ui.setStatus("email", `email: archiving ${item.senderEmail || "thread"}…`);
-              await archiveThreadIds([item.threadId]);
-              ctx.ui.notify(`archived ${item.senderEmail || item.threadId}`, "info");
-              continue;
-            }
-
-            if (choice === "trash") {
-              ctx.ui.setStatus("email", `email: moving ${item.senderEmail || "thread"} to trash…`);
-              await trashThreadIds([item.threadId]);
-              ctx.ui.notify(`moved ${item.senderEmail || item.threadId} to trash`, "info");
-              continue;
-            }
-
-            if (choice === "spam") {
-              ctx.ui.setStatus("email", `email: moving ${item.senderEmail || "thread"} to spam…`);
-              await spamThreadIds([item.threadId]);
-              ctx.ui.notify(`moved ${item.senderEmail || item.threadId} to spam`, "info");
-              continue;
-            }
-
-            if (choice === "archiveSimilar") {
-              ctx.ui.setStatus("email", `email: finding messages like ${item.senderEmail || "this"}…`);
-              const { query, threadIds, summaries } = await collectSimilarInboxThreadIds(item);
-              const confirmed = await confirmBulkAction(ctx, "archive messages like this", query, summaries);
-              if (!confirmed) {
-                skippedThreadIds.add(item.threadId);
-                continue;
-              }
-              ctx.ui.setStatus("email", `email: archiving ${threadIds.length} similar thread(s)…`);
-              await archiveThreadIds(threadIds);
-              ctx.ui.notify(`archived ${threadIds.length} similar inbox thread(s) using query: ${query}`, "info");
-              continue;
-            }
-
-            if (choice === "trashSimilar") {
-              ctx.ui.setStatus("email", `email: finding messages like ${item.senderEmail || "this"}…`);
-              const { query, threadIds, summaries } = await collectSimilarInboxThreadIds(item);
-              const confirmed = await confirmBulkAction(ctx, "trash messages like this", query, summaries);
-              if (!confirmed) {
-                skippedThreadIds.add(item.threadId);
-                continue;
-              }
-              ctx.ui.setStatus("email", `email: moving ${threadIds.length} similar thread(s) to trash…`);
-              await trashThreadIds(threadIds);
-              ctx.ui.notify(`moved ${threadIds.length} similar inbox thread(s) to trash using query: ${query}`, "info");
-            }
-          }
+          await runInboxSweep(ctx);
         } catch (error) {
           ctx.ui.notify(`inbox sweep failed: ${error instanceof Error ? error.message : String(error)}`, "error");
         } finally {

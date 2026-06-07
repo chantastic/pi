@@ -59,7 +59,7 @@ http://127.0.0.1:53682/oauth2/callback
 - `/email inbox-sweep` fetches the full current message and displays the sender, full subject, and a local text excerpt. It does not call Ollama or any remote model provider during triage.
 - Unsubscribe candidate collection fetches full latest messages only to extract unsubscribe headers/body links.
 - Long-running commands show an `email:` footer status while loading candidates, triaging, archiving, moving to spam, or moving to trash.
-- `/email inbox-sweep` repeatedly finds the newest inbox email in a top-left full-screen overlay, shows sender, a Gmail inbox search link for that sender, full subject, and a local text excerpt, then accepts Gmail-like shortcuts:
+- `/email inbox-sweep` opens a persistent top-left full-screen overlay, prefetches the next email while you triage the current one, shows sender, a Gmail inbox search link for that sender, full subject, and a local text excerpt, then accepts Gmail-like shortcuts:
   - `Return` / `e` — Archive
   - `E` — Archive messages like this
   - `#` — Trash
