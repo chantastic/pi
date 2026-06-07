@@ -219,12 +219,14 @@ type UnsubscribeCandidate = {
   unsubscribeUrls: string[];
   unsubscribeMailtos: string[];
   chosenUrl?: string;
-  archiveMessageIds: string[];
-  countFromSenderInInbox: number;
+  archiveThreadIds: string[];
+  countInboxThreadsFromSender: number;
 };
 
 function senderEmail(from: string) {
-  return from.match(/<([^>]+)>/)?.[1]?.toLowerCase() ?? from.trim().toLowerCase();
+  return (
+    from.match(/<([^>]+)>/)?.[1] ?? from.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] ?? from.trim()
+  ).toLowerCase();
 }
 
 function decodeBase64Url(data: string) {
@@ -249,30 +251,29 @@ function extractMailtos(text: string) {
     .filter((url, index, urls) => urls.indexOf(url) === index);
 }
 
-async function listMessageIds(query: string, accessToken: string): Promise<string[]> {
+async function listThreadIds(query: string, accessToken: string): Promise<string[]> {
   const ids: string[] = [];
   let pageToken: string | undefined;
 
   do {
     const params = new URLSearchParams({ q: query, maxResults: "500" });
     if (pageToken) params.set("pageToken", pageToken);
-    const page = await gmailGet<{ messages?: Array<{ id: string }>; nextPageToken?: string }>(
-      `/users/me/messages?${params}`,
+    const page = await gmailGet<{ threads?: Array<{ id: string }>; nextPageToken?: string }>(
+      `/users/me/threads?${params}`,
       accessToken,
     );
-    ids.push(...(page.messages ?? []).map((message) => message.id));
+    ids.push(...(page.threads ?? []).map((thread) => thread.id));
     pageToken = page.nextPageToken;
   } while (pageToken);
 
   return ids;
 }
 
-async function archiveMessageIds(messageIds: string[]) {
-  if (messageIds.length === 0) return;
+async function archiveThreadIds(threadIds: string[]) {
+  if (threadIds.length === 0) return;
   const accessToken = await getAccessToken();
-  for (let index = 0; index < messageIds.length; index += 1000) {
-    await gmailPost(`/users/me/messages/batchModify`, accessToken, {
-      ids: messageIds.slice(index, index + 1000),
+  for (const threadId of threadIds) {
+    await gmailPost(`/users/me/threads/${encodeURIComponent(threadId)}/modify`, accessToken, {
       removeLabelIds: ["INBOX"],
     });
   }
@@ -323,7 +324,8 @@ async function collectUnsubscribeCandidates(maxSenders = 10): Promise<Unsubscrib
     const unsubscribeMailtos = [...extractMailtos(listUnsubscribe), ...extractMailtos(bodyText)].filter(
       (url, index, urls) => urls.indexOf(url) === index,
     );
-    const archiveMessageIds = await listMessageIds(`in:inbox from:${email}`, accessToken);
+    const matchingThreadIds = await listThreadIds(`in:inbox from:${email}`, accessToken);
+    const archiveThreadIds = [full.threadId, ...matchingThreadIds].filter((id, index, ids) => ids.indexOf(id) === index);
 
     candidates.push({
       sender: from,
@@ -337,12 +339,12 @@ async function collectUnsubscribeCandidates(maxSenders = 10): Promise<Unsubscrib
       unsubscribeUrls,
       unsubscribeMailtos,
       chosenUrl: unsubscribeUrls[0],
-      archiveMessageIds,
-      countFromSenderInInbox: archiveMessageIds.length,
+      archiveThreadIds,
+      countInboxThreadsFromSender: archiveThreadIds.length,
     });
   }
 
-  return candidates.sort((a, b) => b.countFromSenderInInbox - a.countFromSenderInInbox);
+  return candidates.sort((a, b) => b.countInboxThreadsFromSender - a.countInboxThreadsFromSender);
 }
 
 async function exchangeCodeForToken(code: string): Promise<GmailToken> {
@@ -486,7 +488,7 @@ export default function (pi: ExtensionAPI) {
               ? "No unsubscribe candidates found."
               : candidates
                   .map((candidate) =>
-                    `${candidate.countFromSenderInInbox} inbox email(s) — ${candidate.sender || candidate.senderEmail}: ${candidate.subject || "(no subject)"}\n${candidate.chosenUrl ? `  ${new URL(candidate.chosenUrl).host}` : candidate.unsubscribeMailtos[0] ? "  mailto unsubscribe available" : "  no unsubscribe URL found"}`,
+                    `${candidate.countInboxThreadsFromSender} inbox thread(s) — ${candidate.sender || candidate.senderEmail}: ${candidate.subject || "(no subject)"}\n${candidate.chosenUrl ? `  ${new URL(candidate.chosenUrl).host}` : candidate.unsubscribeMailtos[0] ? "  mailto unsubscribe available" : "  no unsubscribe URL found"}`,
                   )
                   .join("\n"),
             "info",
@@ -510,7 +512,7 @@ export default function (pi: ExtensionAPI) {
 
           for (const [index, candidate] of candidates.entries()) {
             ctx.ui.setStatus("email", `email: triaging ${index + 1}/${candidates.length}`);
-            const label = `${candidate.countFromSenderInInbox} inbox email(s) — ${candidate.sender || candidate.senderEmail}\n${candidate.subject || "(no subject)"}`;
+            const label = `${candidate.countInboxThreadsFromSender} inbox thread(s) — ${candidate.sender || candidate.senderEmail}\n${candidate.subject || "(no subject)"}`;
             const choice = await ctx.ui.select(label, [
               "1. Unsubscribe and archive all",
               "2. Archive-only",
@@ -538,9 +540,9 @@ export default function (pi: ExtensionAPI) {
               }
             }
 
-            ctx.ui.setStatus("email", `email: archiving ${candidate.countFromSenderInInbox} from ${candidate.senderEmail}…`);
-            await archiveMessageIds(candidate.archiveMessageIds);
-            ctx.ui.notify(`archived ${candidate.countFromSenderInInbox} inbox email(s) from ${candidate.senderEmail}`, "info");
+            ctx.ui.setStatus("email", `email: archiving ${candidate.countInboxThreadsFromSender} thread(s) from ${candidate.senderEmail}…`);
+            await archiveThreadIds(candidate.archiveThreadIds);
+            ctx.ui.notify(`archived ${candidate.countInboxThreadsFromSender} inbox thread(s) from ${candidate.senderEmail}`, "info");
           }
         } catch (error) {
           ctx.ui.notify(`unsubscribe sweep failed: ${error instanceof Error ? error.message : String(error)}`, "error");
@@ -615,7 +617,7 @@ export default function (pi: ExtensionAPI) {
                 : candidates
                     .map(
                       (candidate) =>
-                        `- ${candidate.countFromSenderInInbox} inbox email(s) — ${candidate.sender || candidate.senderEmail}: ${candidate.subject || "(no subject)"}\n  ${candidate.chosenUrl ?? candidate.unsubscribeMailtos[0] ?? "No unsubscribe URL found."}`,
+                        `- ${candidate.countInboxThreadsFromSender} inbox thread(s) — ${candidate.sender || candidate.senderEmail}: ${candidate.subject || "(no subject)"}\n  ${candidate.chosenUrl ?? candidate.unsubscribeMailtos[0] ?? "No unsubscribe URL found."}`,
                     )
                     .join("\n"),
           },
