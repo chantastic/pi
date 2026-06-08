@@ -26,22 +26,17 @@ http://127.0.0.1:53682/oauth2/callback
 ## Commands
 
 ```text
-/email config                 # store Google OAuth client credentials in Keychain
-/email auth                   # open Google OAuth, store Gmail token in Keychain
-/email status                 # check whether config and Gmail auth are present
-/email inbox                  # list recent unread inbox metadata/snippets
-/email inbox-sweep            # auto-play inbox triage with one-sentence summaries
-/email unsubscribe-candidates # list newest unsubscribe senders with inbox thread titles
-/email unsubscribe-sweep      # triage unsubscribe/archive decisions interactively
-/email logout                 # delete stored Gmail token
-/email clear-config           # delete stored OAuth client credentials
+/email              # start inbox triage
+/email config       # store Google OAuth client credentials in Keychain
+/email auth         # open Google OAuth, store Gmail token in Keychain
+/email status       # check whether config and Gmail auth are present
+/email logout       # delete stored Gmail token
+/email clear-config # delete stored OAuth client credentials
 ```
 
 ## Tool
 
 - `email_status` — reports backend, storage, scope, and auth readiness
-- `email_collect_inbox` — collects recent unread inbox message metadata/snippets
-- `email_collect_unsubscribe_candidates` — finds newest inbox messages containing unsubscribe text, groups by sender, extracts candidate unsubscribe URLs/mailtos, and reports the matching inbox thread titles that would be archived
 
 ## Security posture
 
@@ -55,11 +50,9 @@ http://127.0.0.1:53682/oauth2/callback
   - config service: `pi-email-gmail-config`
   - account: `default`
 - No tokens or secrets are written into this repo.
-- Inbox collection uses `format=metadata` plus Gmail snippets; it does not fetch full message bodies.
-- `/email inbox-sweep` fetches the full current message and displays the sender, full subject, and a local text excerpt. It does not call Ollama or any remote model provider during triage.
-- Unsubscribe candidate collection fetches full latest messages only to extract unsubscribe headers/body links.
-- Long-running commands show an `email:` footer status while loading candidates, triaging, archiving, moving to spam, or moving to trash.
-- `/email inbox-sweep` opens a persistent top-left full-screen overlay, prefetches the next email while you triage the current one, shows sender, a Gmail inbox search link for that sender, any detected unsubscribe link, full subject, and the message text in a scrollable pane, then accepts Gmail-like shortcuts:
+- `/email` fetches the full current message and displays it locally. It does not call Ollama or any remote model provider during triage.
+- Long-running actions show an `email:` footer status while loading, triaging, archiving, moving to spam, or moving to trash.
+- `/email` opens a persistent top-left full-screen overlay, prefetches the next email while you triage the current one, shows sender, a Gmail inbox search link for that sender, any detected unsubscribe link, full subject, and the message text in a scrollable pane, then accepts Gmail-like shortcuts:
   - `Return` / `e` — Archive
   - `E` — Archive messages like this
   - `#` — Trash
@@ -73,19 +66,10 @@ http://127.0.0.1:53682/oauth2/callback
   - `q` / `Esc` — Escape
   - `?` — Toggle shortcut legend
 - Archive/Trash messages like this opens a confirmation view with a Gmail search query, Gmail search link, and matching thread titles. It starts filtered by sender plus up to four meaningful subject keywords. Press `+` to expand to all inbox messages from that sender, `-` to restore the subject filter, `Return` to execute the currently shown query, or `Esc` to cancel and move to the next inbox message.
-- `/email unsubscribe-sweep` repeatedly finds the newest inbox email containing unsubscribe text in a full-screen overlay, queries all matching inbox threads from that sender, shows the sender email plus thread titles, then accepts Gmail-like shortcuts:
-  - `Return` — Unsubscribe and archive all
-  - `e` — Archive-only
-  - `!` — Spam all
-  - `#` — Trash all
-  - `j` — Skip
-  - `q` / `Esc` — Escape
-  - `?` — Toggle shortcut legend
-- Archive, spam, and trash actions remove `UNREAD` so affected threads are marked read while leaving the inbox. Spam all applies Gmail's `SPAM` label and removes `INBOX` from the matching threads. Trash all moves matching threads to Gmail Trash. Skip leaves that sender untouched for this run and moves to the next candidate. Escape stops the sweep.
-- In inbox sweep, unsubscribe links are extracted from `List-Unsubscribe` and message body HTTP URLs. `u` opens the first detected unsubscribe link. `U` opens it and archives all inbox threads from that sender. It does not ask for confirmation or fall back to `mailto:` yet.
-- Choosing unsubscribe in unsubscribe sweep opens the HTTP unsubscribe link in the local browser when available, then archives the matching inbox threads. It does not ask for confirmation or fall back to `mailto:` yet.
-- The extension never fetches unsubscribe URLs server-side, clicks through pages, or sends mail. Archive/spam/trash actions run only after an explicit sweep choice.
-- Archive targets always include the candidate's latest thread plus all inbox threads matching the sender email. This avoids leaving the selected sender visible when Gmail's thread UI and message-level searches disagree.
+- Archive, spam, and trash actions remove `UNREAD` so affected threads are marked read while leaving the inbox. Spam applies Gmail's `SPAM` label and removes `INBOX` from the matching threads. Trash moves matching threads to Gmail Trash. Skip leaves that thread untouched for this run and moves to the next inbox message. Escape stops triage.
+- Unsubscribe links are extracted from `List-Unsubscribe` and message body HTTP URLs. `u` opens the first detected unsubscribe link. `U` opens it and archives all inbox threads from that sender. It does not ask for confirmation or fall back to `mailto:` yet.
+- The extension never fetches unsubscribe URLs server-side, clicks through pages, or sends mail. Archive/spam/trash actions run only after an explicit triage choice.
+- Sender-wide archive targets always include the current thread plus all inbox threads matching the sender email. This avoids leaving the selected sender visible when Gmail's thread UI and message-level searches disagree.
 
 ## Local install location
 

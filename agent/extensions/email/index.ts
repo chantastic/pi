@@ -1008,15 +1008,23 @@ async function startOAuthFlow(): Promise<GmailToken> {
 
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("email", {
-    description: "Email assistant commands",
+    description: "Triage Gmail inbox",
     handler: async (args, ctx) => {
-      const subcommand = args.trim() || "help";
+      const subcommand = args.trim();
+
+      if (!subcommand) {
+        try {
+          await runInboxSweep(ctx);
+        } catch (error) {
+          ctx.ui.notify(`email failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+        } finally {
+          ctx.ui.setStatus("email", undefined);
+        }
+        return;
+      }
 
       if (subcommand === "help") {
-        ctx.ui.notify(
-          "/email config, /email auth, /email status, /email inbox, /email inbox-sweep, /email unsubscribe-candidates, /email unsubscribe-sweep, /email logout, /email clear-config",
-          "info",
-        );
+        ctx.ui.notify("/email starts inbox triage. Setup/admin: /email config, /email auth, /email status, /email logout, /email clear-config", "info");
         return;
       }
 
@@ -1054,113 +1062,6 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      if (subcommand === "inbox") {
-        ctx.ui.setStatus("email", "email: loading inbox…");
-        try {
-          const items = await collectInbox(10);
-          if (items.length === 0) {
-            ctx.ui.notify("No unread inbox messages found.", "info");
-            return;
-          }
-          ctx.ui.notify(
-            items.map((item) => `${item.from || "unknown"}: ${item.subject || "(no subject)"}`).join("\n"),
-            "info",
-          );
-        } catch (error) {
-          ctx.ui.notify(`gmail inbox failed: ${error instanceof Error ? error.message : String(error)}`, "error");
-        } finally {
-          ctx.ui.setStatus("email", undefined);
-        }
-        return;
-      }
-
-      if (subcommand === "inbox-sweep") {
-        try {
-          await runInboxSweep(ctx);
-        } catch (error) {
-          ctx.ui.notify(`inbox sweep failed: ${error instanceof Error ? error.message : String(error)}`, "error");
-        } finally {
-          ctx.ui.setStatus("email", undefined);
-        }
-        return;
-      }
-
-      if (subcommand === "unsubscribe-candidates") {
-        ctx.ui.setStatus("email", "email: finding newest unsubscribe senders…");
-        try {
-          const candidates = await collectUnsubscribeCandidates(10);
-          ctx.ui.notify(
-            candidates.length === 0
-              ? "No unsubscribe candidates found."
-              : candidates.map(formatCandidateSummary).join("\n\n"),
-            "info",
-          );
-        } catch (error) {
-          ctx.ui.notify(`unsubscribe candidates failed: ${error instanceof Error ? error.message : String(error)}`, "error");
-        } finally {
-          ctx.ui.setStatus("email", undefined);
-        }
-        return;
-      }
-
-      if (subcommand === "unsubscribe-sweep") {
-        const skippedSenders = new Set<string>();
-        let considered = 0;
-
-        try {
-          while (true) {
-            ctx.ui.setStatus("email", "email: finding newest unsubscribe sender…");
-            const [candidate] = await collectUnsubscribeCandidates(1, skippedSenders);
-            if (!candidate) {
-              ctx.ui.notify(considered === 0 ? "No unsubscribe candidates found." : "unsubscribe sweep complete", "info");
-              return;
-            }
-
-            considered++;
-            ctx.ui.setStatus("email", `email: triaging ${candidate.senderEmail}`);
-            const choice = await chooseEmailAction(ctx, "Unsubscribe sweep", formatCandidatePrompt(candidate), UNSUBSCRIBE_SWEEP_ACTIONS);
-
-            if (choice === "escape") {
-              ctx.ui.notify("unsubscribe sweep stopped", "info");
-              return;
-            }
-
-            if (choice === "skip") {
-              skippedSenders.add(candidate.senderEmail);
-              continue;
-            }
-
-            if (choice === "unsubscribeArchive") {
-              if (candidate.chosenUrl) await execFileAsync("open", [candidate.chosenUrl]);
-              else ctx.ui.notify(`No HTTP unsubscribe link found for ${candidate.senderEmail}. Archiving only.`, "warning");
-            }
-
-            if (choice === "spam") {
-              ctx.ui.setStatus("email", `email: moving ${candidate.countInboxThreadsFromSender} thread(s) from ${candidate.senderEmail} to spam…`);
-              await spamThreadIds(candidate.archiveThreadIds);
-              ctx.ui.notify(`moved ${candidate.countInboxThreadsFromSender} inbox thread(s) from ${candidate.senderEmail} to spam`, "info");
-              continue;
-            }
-
-            if (choice === "trash") {
-              ctx.ui.setStatus("email", `email: moving ${candidate.countInboxThreadsFromSender} thread(s) from ${candidate.senderEmail} to trash…`);
-              await trashThreadIds(candidate.archiveThreadIds);
-              ctx.ui.notify(`moved ${candidate.countInboxThreadsFromSender} inbox thread(s) from ${candidate.senderEmail} to trash`, "info");
-              continue;
-            }
-
-            ctx.ui.setStatus("email", `email: archiving ${candidate.countInboxThreadsFromSender} thread(s) from ${candidate.senderEmail}…`);
-            await archiveThreadIds(candidate.archiveThreadIds);
-            ctx.ui.notify(`archived ${candidate.countInboxThreadsFromSender} inbox thread(s) from ${candidate.senderEmail}`, "info");
-          }
-        } catch (error) {
-          ctx.ui.notify(`unsubscribe sweep failed: ${error instanceof Error ? error.message : String(error)}`, "error");
-        } finally {
-          ctx.ui.setStatus("email", undefined);
-        }
-        return;
-      }
-
       if (subcommand === "auth") {
         try {
           ctx.ui.notify("Opening Google OAuth…", "info");
@@ -1183,53 +1084,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerTool({
-    name: "email_collect_inbox",
-    label: "Collect Gmail Inbox",
-    description: "Collect recent unread Gmail inbox message metadata and snippets. Read-only.",
-    parameters: Type.Object({
-      maxResults: Type.Optional(Type.Number({ minimum: 1, maximum: 25, description: "Maximum unread inbox messages to fetch" })),
-    }),
-    async execute(_toolCallId, params) {
-      const items = await collectInbox(params.maxResults ?? 10);
-      return {
-        content: [
-          {
-            type: "text",
-            text:
-              items.length === 0
-                ? "No unread inbox messages found."
-                : items.map((item) => `- ${item.from || "unknown"}: ${item.subject || "(no subject)"}\n  ${item.snippet}`).join("\n"),
-          },
-        ],
-        details: { count: items.length, items },
-      };
-    },
-  });
 
-  pi.registerTool({
-    name: "email_collect_unsubscribe_candidates",
-    label: "Collect Unsubscribe Candidates",
-    description: "Find recent inbox senders with unsubscribe text and extract candidate unsubscribe URLs. Read-only.",
-    parameters: Type.Object({
-      maxSenders: Type.Optional(Type.Number({ minimum: 1, maximum: 25, description: "Maximum senders to inspect" })),
-    }),
-    async execute(_toolCallId, params) {
-      const candidates = await collectUnsubscribeCandidates(params.maxSenders ?? 10);
-      return {
-        content: [
-          {
-            type: "text",
-            text:
-              candidates.length === 0
-                ? "No unsubscribe candidates found."
-                : candidates.map(formatCandidateSummary).join("\n\n"),
-          },
-        ],
-        details: { count: candidates.length, candidates },
-      };
-    },
-  });
 
   pi.registerTool({
     name: "email_status",
