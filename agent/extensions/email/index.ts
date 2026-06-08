@@ -27,6 +27,9 @@ type EmailAction =
   | "unsubscribeArchiveSender"
   | "unsubscribeArchive"
   | "skip"
+  | "previous"
+  | "jumpNext"
+  | "jumpPrevious"
   | "escape";
 
 const EMAIL_ACTIONS: Record<EmailAction, { label: string; keys: string[] }> = {
@@ -38,11 +41,27 @@ const EMAIL_ACTIONS: Record<EmailAction, { label: string; keys: string[] }> = {
   unsubscribeOpen: { label: "Open unsubscribe link", keys: ["u"] },
   unsubscribeArchiveSender: { label: "Open unsubscribe and archive sender", keys: ["U"] },
   unsubscribeArchive: { label: "Unsubscribe and archive", keys: ["Return"] },
-  skip: { label: "Skip", keys: ["j"] },
+  skip: { label: "Next", keys: ["j"] },
+  previous: { label: "Previous", keys: ["k"] },
+  jumpNext: { label: "Jump next 10", keys: ["J"] },
+  jumpPrevious: { label: "Jump previous 10", keys: ["K"] },
   escape: { label: "Escape", keys: ["q", "Esc"] },
 };
 
-const INBOX_SWEEP_ACTIONS: EmailAction[] = ["archive", "archiveSimilar", "trash", "trashSimilar", "spam", "unsubscribeOpen", "unsubscribeArchiveSender", "skip", "escape"];
+const INBOX_SWEEP_ACTIONS: EmailAction[] = [
+  "archive",
+  "archiveSimilar",
+  "trash",
+  "trashSimilar",
+  "spam",
+  "unsubscribeOpen",
+  "unsubscribeArchiveSender",
+  "skip",
+  "previous",
+  "jumpNext",
+  "jumpPrevious",
+  "escape",
+];
 const UNSUBSCRIBE_SWEEP_ACTIONS: EmailAction[] = ["unsubscribeArchive", "archive", "spam", "trash", "skip", "escape"];
 
 type GmailToken = {
@@ -223,6 +242,9 @@ function actionForKey(data: string, actions: EmailAction[]): EmailAction | undef
   if (matchesKey(data, Key.enter)) return actions.includes("unsubscribeArchive") ? "unsubscribeArchive" : "archive";
   if (matchesKey(data, Key.escape) || data === "q") return "escape";
   if (data === "j") return "skip";
+  if (data === "k" && actions.includes("previous")) return "previous";
+  if (data === "J" && actions.includes("jumpNext")) return "jumpNext";
+  if (data === "K" && actions.includes("jumpPrevious")) return "jumpPrevious";
   if (data === "e" && actions.includes("archive")) return "archive";
   if (data === "#" && actions.includes("trash")) return "trash";
   if (data === "!" && actions.includes("spam")) return "spam";
@@ -774,7 +796,9 @@ async function collectUnsubscribeCandidates(maxSenders = 10, excludedSenders = n
 
 async function runInboxSweep(ctx: any) {
   await ctx.ui.custom<void>((tui: { requestRender: () => void }, theme: any, _kb: unknown, done: () => void) => {
-    const skippedThreadIds = new Set<string>();
+    const removedThreadIds = new Set<string>();
+    const items: InboxSweepItem[] = [];
+    let currentIndex = -1;
     let item: InboxSweepItem | null = null;
     let nextItemPromise: Promise<InboxSweepItem | null> | null = null;
     let considered = 0;
@@ -782,37 +806,103 @@ async function runInboxSweep(ctx: any) {
     let message = "Loading newest inbox email…";
     let scrollOffset = 0;
 
+    const currentLabel = (current: InboxSweepItem) => current.senderEmail || current.from || "email";
+
     const excludedForNext = () => {
-      const excluded = new Set(skippedThreadIds);
-      if (item) excluded.add(item.threadId);
+      const excluded = new Set(removedThreadIds);
+      for (const cached of items) excluded.add(cached.threadId);
       return excluded;
     };
 
     const prefetchNext = () => {
-      nextItemPromise = collectNewestInboxSweepItem(excludedForNext()).catch((error) => {
+      nextItemPromise = collectNewestInboxSweepItem(excludedForNext()).then((prefetched) => {
+        if (!prefetched) return null;
+        if (removedThreadIds.has(prefetched.threadId)) return null;
+        if (items.some((cached) => cached.threadId === prefetched.threadId)) return null;
+        return prefetched;
+      }).catch((error) => {
         message = `Prefetch failed: ${error instanceof Error ? error.message : String(error)}`;
         tui.requestRender();
         return null;
       });
     };
 
-    const showNext = async (usePrefetch: boolean) => {
-      processing = true;
-      message = "Loading next inbox email…";
-      tui.requestRender();
-      item = usePrefetch && nextItemPromise ? await nextItemPromise : await collectNewestInboxSweepItem(skippedThreadIds);
+    const setCurrentItem = (next: InboxSweepItem) => {
+      item = next;
       scrollOffset = 0;
+      message = `Triaging ${currentLabel(next)}`;
+      ctx.ui.setStatus("email", `email: ${message.toLowerCase()}`);
+    };
+
+    const loadNextInboxItem = async (usePrefetch: boolean) => {
+      const prefetched = usePrefetch && nextItemPromise ? await nextItemPromise : null;
+      nextItemPromise = null;
+      if (prefetched && !removedThreadIds.has(prefetched.threadId) && !items.some((cached) => cached.threadId === prefetched.threadId)) {
+        return prefetched;
+      }
+      return await collectNewestInboxSweepItem(excludedForNext());
+    };
+
+    const showNext = async (count = 1, usePrefetch = true) => {
+      processing = true;
+      message = count > 1 ? `Loading next ${count} inbox emails…` : "Loading next inbox email…";
+      tui.requestRender();
+
+      let moved = false;
+      for (let step = 0; step < count; step++) {
+        if (currentIndex < items.length - 1) {
+          currentIndex++;
+          setCurrentItem(items[currentIndex]!);
+          moved = true;
+          continue;
+        }
+
+        const next = await loadNextInboxItem(usePrefetch && step === 0);
+        if (!next) break;
+        items.push(next);
+        currentIndex = items.length - 1;
+        considered++;
+        setCurrentItem(next);
+        moved = true;
+      }
+
       processing = false;
-      if (!item) {
-        ctx.ui.notify(considered === 0 ? "No inbox emails found." : "inbox sweep complete", "info");
-        done();
+      if (!moved) {
+        if (!item) {
+          ctx.ui.notify(considered === 0 ? "No inbox emails found." : "inbox sweep complete", "info");
+          done();
+          return;
+        }
+        message = "No more inbox emails loaded.";
+      } else {
+        prefetchNext();
+      }
+      tui.requestRender();
+    };
+
+    const showPrevious = (count = 1) => {
+      if (!item) return;
+      if (currentIndex <= 0) {
+        message = "At newest loaded email.";
+        tui.requestRender();
         return;
       }
-      considered++;
-      message = `Triaging ${item.senderEmail || item.from || "email"}`;
-      ctx.ui.setStatus("email", `email: ${message.toLowerCase()}`);
+      currentIndex = Math.max(0, currentIndex - count);
+      setCurrentItem(items[currentIndex]!);
       prefetchNext();
       tui.requestRender();
+    };
+
+    const removeThreadIdsFromCache = (threadIds: string[]) => {
+      for (const threadId of threadIds) removedThreadIds.add(threadId);
+      const removed = new Set(threadIds);
+      for (let index = items.length - 1; index >= 0; index--) {
+        if (!removed.has(items[index]!.threadId)) continue;
+        items.splice(index, 1);
+        if (index <= currentIndex) currentIndex--;
+      }
+      if (currentIndex >= items.length) currentIndex = items.length - 1;
+      item = currentIndex >= 0 ? items[currentIndex]! : null;
     };
 
     const act = async (choice: EmailAction) => {
@@ -825,38 +915,52 @@ async function runInboxSweep(ctx: any) {
       const current = item;
       try {
         if (choice === "skip") {
-          skippedThreadIds.add(current.threadId);
-          await showNext(true);
+          await showNext(1, true);
+          return;
+        }
+        if (choice === "previous") {
+          showPrevious(1);
+          return;
+        }
+        if (choice === "jumpNext") {
+          await showNext(10, true);
+          return;
+        }
+        if (choice === "jumpPrevious") {
+          showPrevious(10);
           return;
         }
         if (choice === "archive") {
           processing = true;
-          message = `Archiving ${current.senderEmail || "thread"}…`;
+          message = `Archiving ${currentLabel(current)}…`;
           tui.requestRender();
           await archiveThreadIds([current.threadId]);
-          await showNext(true);
+          removeThreadIdsFromCache([current.threadId]);
+          await showNext(1, true);
           return;
         }
         if (choice === "trash") {
           processing = true;
-          message = `Moving ${current.senderEmail || "thread"} to trash…`;
+          message = `Moving ${currentLabel(current)} to trash…`;
           tui.requestRender();
           await trashThreadIds([current.threadId]);
-          await showNext(true);
+          removeThreadIdsFromCache([current.threadId]);
+          await showNext(1, true);
           return;
         }
         if (choice === "spam") {
           processing = true;
-          message = `Moving ${current.senderEmail || "thread"} to spam…`;
+          message = `Moving ${currentLabel(current)} to spam…`;
           tui.requestRender();
           await spamThreadIds([current.threadId]);
-          await showNext(true);
+          removeThreadIdsFromCache([current.threadId]);
+          await showNext(1, true);
           return;
         }
         if (choice === "unsubscribeOpen") {
           if (current.chosenUnsubscribeUrl) {
             await execFileAsync("open", [current.chosenUnsubscribeUrl]);
-            message = `Opened unsubscribe link for ${current.senderEmail || "sender"}`;
+            message = `Opened unsubscribe link for ${currentLabel(current)}`;
           } else {
             message = "No unsubscribe link found for this message.";
           }
@@ -870,24 +974,25 @@ async function runInboxSweep(ctx: any) {
             return;
           }
           processing = true;
-          message = `Opening unsubscribe and archiving ${current.senderEmail || "sender"}…`;
+          message = `Opening unsubscribe and archiving ${currentLabel(current)}…`;
           tui.requestRender();
           await execFileAsync("open", [current.chosenUnsubscribeUrl]);
           const { query, threadIds } = await collectInboxThreadIdsFromSender(current);
           await archiveThreadIds(threadIds);
+          removeThreadIdsFromCache(threadIds);
+          nextItemPromise = null;
           ctx.ui.notify(`opened unsubscribe link and archived ${threadIds.length} inbox thread(s) using query: ${query}`, "info");
-          await showNext(false);
+          await showNext(1, false);
           return;
         }
         if (choice === "archiveSimilar" || choice === "trashSimilar") {
           processing = true;
-          message = `Finding messages like ${current.senderEmail || "this"}…`;
+          message = `Finding messages like ${currentLabel(current)}…`;
           tui.requestRender();
           const isTrash = choice === "trashSimilar";
           const result = await confirmBulkAction(ctx, isTrash ? "trash messages like this" : "archive messages like this", current);
           if (!result.confirmed) {
-            skippedThreadIds.add(current.threadId);
-            await showNext(true);
+            await showNext(1, true);
             return;
           }
           const { query, threadIds } = result.selection;
@@ -895,8 +1000,10 @@ async function runInboxSweep(ctx: any) {
           tui.requestRender();
           if (isTrash) await trashThreadIds(threadIds);
           else await archiveThreadIds(threadIds);
+          removeThreadIdsFromCache(threadIds);
+          nextItemPromise = null;
           ctx.ui.notify(`${isTrash ? "moved" : "archived"} ${threadIds.length} similar inbox thread(s) using query: ${query}`, "info");
-          await showNext(false);
+          await showNext(1, false);
         }
       } catch (error) {
         message = `Action failed: ${error instanceof Error ? error.message : String(error)}`;
@@ -905,13 +1012,13 @@ async function runInboxSweep(ctx: any) {
       }
     };
 
-    setTimeout(() => void showNext(false), 0);
+    setTimeout(() => void showNext(1, false), 0);
 
     return {
       render(width: number) {
         const body = item ? formatInboxSweepPrompt(item).split("\n") : [message];
         if (processing) body.push("", theme?.fg ? theme.fg("muted", message) : message);
-        return boxedLines("Inbox sweep", body, `${actionLegend(INBOX_SWEEP_ACTIONS)}  ·  ↑/↓ Scroll  ·  ? Help`, width, theme, scrollOffset);
+        return boxedLines("Email", body, `${actionLegend(INBOX_SWEEP_ACTIONS)}  ·  ↑/↓ Scroll  ·  Ctrl-U/Ctrl-D Scroll  ·  ? Help`, width, theme, scrollOffset);
       },
       handleInput(data: string) {
         if (matchesKey(data, Key.up)) {
@@ -924,12 +1031,12 @@ async function runInboxSweep(ctx: any) {
           tui.requestRender();
           return;
         }
-        if (matchesKey(data, "pageup") || matchesKey(data, Key.ctrl("u")) || data === "K") {
+        if (matchesKey(data, "pageup") || matchesKey(data, Key.ctrl("u"))) {
           scrollOffset = Math.max(0, scrollOffset - 10);
           tui.requestRender();
           return;
         }
-        if (matchesKey(data, "pagedown") || matchesKey(data, Key.ctrl("d")) || data === "J") {
+        if (matchesKey(data, "pagedown") || matchesKey(data, Key.ctrl("d"))) {
           scrollOffset += 10;
           tui.requestRender();
           return;

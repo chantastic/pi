@@ -60,13 +60,16 @@ http://127.0.0.1:53682/oauth2/callback
   - `!` — Spam
   - `u` — Open detected unsubscribe link
   - `U` — Open detected unsubscribe link and archive all inbox threads from that sender
-  - `j` — Skip
+  - `j` — Next message
+  - `k` — Previous loaded message
+  - `J` — Jump next 10 messages
+  - `K` — Jump previous 10 loaded messages
   - `↑` / `↓` — Scroll message pane
-  - `PageUp` / `PageDown`, `Ctrl-U` / `Ctrl-D`, `K` / `J` — Jump message pane
+  - `PageUp` / `PageDown`, `Ctrl-U` / `Ctrl-D` — Jump message pane
   - `q` / `Esc` — Escape
   - `?` — Toggle shortcut legend
 - Archive/Trash messages like this opens a confirmation view with a Gmail search query, Gmail search link, and matching thread titles. It starts filtered by sender plus up to four meaningful subject keywords. Press `+` to expand to all inbox messages from that sender, `-` to restore the subject filter, `Return` to execute the currently shown query, or `Esc` to cancel and move to the next inbox message.
-- Archive, spam, and trash actions remove `UNREAD` so affected threads are marked read while leaving the inbox. Spam applies Gmail's `SPAM` label and removes `INBOX` from the matching threads. Trash moves matching threads to Gmail Trash. Skip leaves that thread untouched for this run and moves to the next inbox message. Escape stops triage.
+- Archive, spam, and trash actions remove `UNREAD` so affected threads are marked read while leaving the inbox. Spam applies Gmail's `SPAM` label and removes `INBOX` from the matching threads. Trash moves matching threads to Gmail Trash. Next/previous navigation leaves threads untouched. Escape stops triage.
 - Unsubscribe links are extracted from `List-Unsubscribe` and message body HTTP URLs. `u` opens the first detected unsubscribe link. `U` opens it and archives all inbox threads from that sender. It does not ask for confirmation or fall back to `mailto:` yet.
 - The extension never fetches unsubscribe URLs server-side, clicks through pages, or sends mail. Archive/spam/trash actions run only after an explicit triage choice.
 - Sender-wide archive targets always include the current thread plus all inbox threads matching the sender email. This avoids leaving the selected sender visible when Gmail's thread UI and message-level searches disagree.
