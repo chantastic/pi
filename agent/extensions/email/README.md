@@ -59,12 +59,14 @@ http://127.0.0.1:53682/oauth2/callback
 - `/email inbox-sweep` fetches the full current message and displays the sender, full subject, and a local text excerpt. It does not call Ollama or any remote model provider during triage.
 - Unsubscribe candidate collection fetches full latest messages only to extract unsubscribe headers/body links.
 - Long-running commands show an `email:` footer status while loading candidates, triaging, archiving, moving to spam, or moving to trash.
-- `/email inbox-sweep` opens a persistent top-left full-screen overlay, prefetches the next email while you triage the current one, shows sender, a Gmail inbox search link for that sender, full subject, and the message text in a scrollable pane, then accepts Gmail-like shortcuts:
+- `/email inbox-sweep` opens a persistent top-left full-screen overlay, prefetches the next email while you triage the current one, shows sender, a Gmail inbox search link for that sender, any detected unsubscribe link, full subject, and the message text in a scrollable pane, then accepts Gmail-like shortcuts:
   - `Return` / `e` — Archive
   - `E` — Archive messages like this
   - `#` — Trash
   - `T` — Trash messages like this
   - `!` — Spam
+  - `u` — Open detected unsubscribe link
+  - `U` — Open detected unsubscribe link and archive all inbox threads from that sender
   - `j` — Skip
   - `↑` / `↓` — Scroll message pane
   - `PageUp` / `PageDown`, `Ctrl-U` / `Ctrl-D` — Jump message pane
@@ -80,7 +82,8 @@ http://127.0.0.1:53682/oauth2/callback
   - `q` / `Esc` — Escape
   - `?` — Toggle shortcut legend
 - Archive, spam, and trash actions remove `UNREAD` so affected threads are marked read while leaving the inbox. Spam all applies Gmail's `SPAM` label and removes `INBOX` from the matching threads. Trash all moves matching threads to Gmail Trash. Skip leaves that sender untouched for this run and moves to the next candidate. Escape stops the sweep.
-- Choosing unsubscribe opens the HTTP unsubscribe link in the local browser when available, then archives the matching inbox threads. It does not ask for confirmation or fall back to `mailto:` yet.
+- In inbox sweep, unsubscribe links are extracted from `List-Unsubscribe` and message body HTTP URLs. `u` opens the first detected unsubscribe link. `U` opens it and archives all inbox threads from that sender. It does not ask for confirmation or fall back to `mailto:` yet.
+- Choosing unsubscribe in unsubscribe sweep opens the HTTP unsubscribe link in the local browser when available, then archives the matching inbox threads. It does not ask for confirmation or fall back to `mailto:` yet.
 - The extension never fetches unsubscribe URLs server-side, clicks through pages, or sends mail. Archive/spam/trash actions run only after an explicit sweep choice.
 - Archive targets always include the candidate's latest thread plus all inbox threads matching the sender email. This avoids leaving the selected sender visible when Gmail's thread UI and message-level searches disagree.
 

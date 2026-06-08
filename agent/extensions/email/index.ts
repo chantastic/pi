@@ -23,6 +23,8 @@ type EmailAction =
   | "spam"
   | "archiveSimilar"
   | "trashSimilar"
+  | "unsubscribeOpen"
+  | "unsubscribeArchiveSender"
   | "unsubscribeArchive"
   | "skip"
   | "escape";
@@ -33,12 +35,14 @@ const EMAIL_ACTIONS: Record<EmailAction, { label: string; keys: string[] }> = {
   spam: { label: "Spam", keys: ["!"] },
   archiveSimilar: { label: "Archive messages like this", keys: ["E"] },
   trashSimilar: { label: "Trash messages like this", keys: ["T"] },
+  unsubscribeOpen: { label: "Open unsubscribe link", keys: ["u"] },
+  unsubscribeArchiveSender: { label: "Open unsubscribe and archive sender", keys: ["U"] },
   unsubscribeArchive: { label: "Unsubscribe and archive", keys: ["Return"] },
   skip: { label: "Skip", keys: ["j"] },
   escape: { label: "Escape", keys: ["q", "Esc"] },
 };
 
-const INBOX_SWEEP_ACTIONS: EmailAction[] = ["archive", "archiveSimilar", "trash", "trashSimilar", "spam", "skip", "escape"];
+const INBOX_SWEEP_ACTIONS: EmailAction[] = ["archive", "archiveSimilar", "trash", "trashSimilar", "spam", "unsubscribeOpen", "unsubscribeArchiveSender", "skip", "escape"];
 const UNSUBSCRIBE_SWEEP_ACTIONS: EmailAction[] = ["unsubscribeArchive", "archive", "spam", "trash", "skip", "escape"];
 
 type GmailToken = {
@@ -173,6 +177,8 @@ type InboxSweepItem = {
   date: string;
   snippet: string;
   bodyText: string;
+  unsubscribeUrls: string[];
+  chosenUnsubscribeUrl?: string;
 };
 
 function headerValue(headers: Array<{ name?: string; value?: string }> | undefined, name: string) {
@@ -222,6 +228,8 @@ function actionForKey(data: string, actions: EmailAction[]): EmailAction | undef
   if (data === "!" && actions.includes("spam")) return "spam";
   if (data === "E" && actions.includes("archiveSimilar")) return "archiveSimilar";
   if (data === "T" && actions.includes("trashSimilar")) return "trashSimilar";
+  if (data === "u" && actions.includes("unsubscribeOpen")) return "unsubscribeOpen";
+  if (data === "U" && actions.includes("unsubscribeArchiveSender")) return "unsubscribeArchiveSender";
   return undefined;
 }
 
@@ -606,6 +614,11 @@ async function collectNewestInboxSweepItem(excludedThreadIds = new Set<string>()
       if (excludedThreadIds.has(full.threadId)) continue;
 
       const from = headerValue(full.payload?.headers, "From");
+      const listUnsubscribe = headerValue(full.payload?.headers, "List-Unsubscribe");
+      const rawBodyText = collectPayloadText(full.payload);
+      const unsubscribeUrls = [...extractHttpUrls(listUnsubscribe), ...extractHttpUrls(rawBodyText)].filter(
+        (url, index, urls) => urls.indexOf(url) === index,
+      );
       return {
         messageId: full.id,
         threadId: full.threadId,
@@ -614,7 +627,9 @@ async function collectNewestInboxSweepItem(excludedThreadIds = new Set<string>()
         subject: headerValue(full.payload?.headers, "Subject"),
         date: headerValue(full.payload?.headers, "Date"),
         snippet: full.snippet ?? "",
-        bodyText: cleanEmailText(collectPayloadText(full.payload)),
+        bodyText: cleanEmailText(rawBodyText),
+        unsubscribeUrls,
+        chosenUnsubscribeUrl: unsubscribeUrls[0],
       };
     }
 
@@ -639,11 +654,12 @@ function formatInboxSweepPrompt(item: InboxSweepItem) {
   return [
     item.from || item.senderEmail || "unknown sender",
     `Link: ${gmailSearchUrl(query)}`,
+    item.chosenUnsubscribeUrl ? `Unsubscribe: ${item.chosenUnsubscribeUrl}` : undefined,
     "",
     item.subject || "(no subject)",
     "",
     body,
-  ].join("\n");
+  ].filter((line) => line !== undefined).join("\n");
 }
 
 const SUBJECT_STOPWORDS = new Set([
@@ -677,6 +693,15 @@ function similarInboxQuery(item: InboxSweepItem) {
 
 function broadSimilarInboxQuery(item: InboxSweepItem) {
   return [`in:inbox`, `from:${item.senderEmail}`].filter(Boolean).join(" ");
+}
+
+async function collectInboxThreadIdsFromSender(item: InboxSweepItem) {
+  const query = broadSimilarInboxQuery(item);
+  const threadIds = await listThreadIds(query, await getAccessToken());
+  return {
+    query,
+    threadIds: [item.threadId, ...threadIds].filter((threadId, index, ids) => ids.indexOf(threadId) === index),
+  };
 }
 
 async function collectSimilarInboxSelection(item: InboxSweepItem, query: string) {
@@ -826,6 +851,32 @@ async function runInboxSweep(ctx: any) {
           tui.requestRender();
           await spamThreadIds([current.threadId]);
           await showNext(true);
+          return;
+        }
+        if (choice === "unsubscribeOpen") {
+          if (current.chosenUnsubscribeUrl) {
+            await execFileAsync("open", [current.chosenUnsubscribeUrl]);
+            message = `Opened unsubscribe link for ${current.senderEmail || "sender"}`;
+          } else {
+            message = "No unsubscribe link found for this message.";
+          }
+          tui.requestRender();
+          return;
+        }
+        if (choice === "unsubscribeArchiveSender") {
+          if (!current.chosenUnsubscribeUrl) {
+            message = "No unsubscribe link found for this message.";
+            tui.requestRender();
+            return;
+          }
+          processing = true;
+          message = `Opening unsubscribe and archiving ${current.senderEmail || "sender"}…`;
+          tui.requestRender();
+          await execFileAsync("open", [current.chosenUnsubscribeUrl]);
+          const { query, threadIds } = await collectInboxThreadIdsFromSender(current);
+          await archiveThreadIds(threadIds);
+          ctx.ui.notify(`opened unsubscribe link and archived ${threadIds.length} inbox thread(s) using query: ${query}`, "info");
+          await showNext(false);
           return;
         }
         if (choice === "archiveSimilar" || choice === "trashSimilar") {
