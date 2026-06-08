@@ -62,7 +62,7 @@ http://127.0.0.1:53682/oauth2/callback
   - `U` — Open detected unsubscribe link and archive all inbox threads from that sender
   - `j` — Skip
   - `↑` / `↓` — Scroll message pane
-  - `PageUp` / `PageDown`, `Ctrl-U` / `Ctrl-D` — Jump message pane
+  - `PageUp` / `PageDown`, `Ctrl-U` / `Ctrl-D`, `K` / `J` — Jump message pane
   - `q` / `Esc` — Escape
   - `?` — Toggle shortcut legend
 - Archive/Trash messages like this opens a confirmation view with a Gmail search query, Gmail search link, and matching thread titles. It starts filtered by sender plus up to four meaningful subject keywords. Press `+` to expand to all inbox messages from that sender, `-` to restore the subject filter, `Return` to execute the currently shown query, or `Esc` to cancel and move to the next inbox message.
