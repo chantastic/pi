@@ -1,6 +1,8 @@
 # pi-extension-email
 
-Email-focused pi extension scaffold. Currently supports one Gmail account via Google OAuth and stores tokens in macOS Keychain.
+Gmail triage extension for Pi. Currently supports one Gmail account via Google OAuth and stores tokens in macOS Keychain.
+
+For design principles and future feature triage, see [PHILOSOPHY.md](./PHILOSOPHY.md).
 
 ## Setup
 

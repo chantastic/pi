@@ -13,9 +13,6 @@ const REDIRECT_PORT = 53682;
 const REDIRECT_URI = `http://127.0.0.1:${REDIRECT_PORT}/oauth2/callback`;
 const GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.modify"];
 const GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1";
-const OLLAMA_API_BASE = process.env.PI_EMAIL_OLLAMA_URL ?? "http://localhost:11434";
-const OLLAMA_EMAIL_MODEL = process.env.PI_EMAIL_OLLAMA_MODEL ?? "qwen3:8b";
-const OLLAMA_KEEP_ALIVE = process.env.PI_EMAIL_OLLAMA_KEEP_ALIVE ?? "30m";
 
 type EmailAction =
   | "archive"
@@ -25,7 +22,6 @@ type EmailAction =
   | "trashSimilar"
   | "unsubscribeOpen"
   | "unsubscribeArchiveSender"
-  | "unsubscribeArchive"
   | "skip"
   | "previous"
   | "jumpNext"
@@ -40,7 +36,6 @@ const EMAIL_ACTIONS: Record<EmailAction, { label: string; keys: string[] }> = {
   trashSimilar: { label: "Trash messages like this", keys: ["T"] },
   unsubscribeOpen: { label: "Open unsubscribe link", keys: ["u"] },
   unsubscribeArchiveSender: { label: "Open unsubscribe and archive sender", keys: ["U"] },
-  unsubscribeArchive: { label: "Unsubscribe and archive", keys: ["Return"] },
   skip: { label: "Next", keys: ["j"] },
   previous: { label: "Previous", keys: ["k"] },
   jumpNext: { label: "Jump next 10", keys: ["J"] },
@@ -62,7 +57,6 @@ const INBOX_SWEEP_ACTIONS: EmailAction[] = [
   "jumpPrevious",
   "escape",
 ];
-const UNSUBSCRIBE_SWEEP_ACTIONS: EmailAction[] = ["unsubscribeArchive", "archive", "spam", "trash", "skip", "escape"];
 
 type GmailToken = {
   access_token?: string;
@@ -177,16 +171,6 @@ async function getAccessToken(): Promise<string> {
   return refreshed.access_token;
 }
 
-type InboxItem = {
-  id: string;
-  threadId: string;
-  from: string;
-  subject: string;
-  date: string;
-  snippet: string;
-  labelIds: string[];
-};
-
 type InboxSweepItem = {
   messageId: string;
   threadId: string;
@@ -202,6 +186,10 @@ type InboxSweepItem = {
 
 function headerValue(headers: Array<{ name?: string; value?: string }> | undefined, name: string) {
   return headers?.find((header) => header.name?.toLowerCase() === name.toLowerCase())?.value ?? "";
+}
+
+function uniqueValues<T>(values: T[]): T[] {
+  return Array.from(new Set(values));
 }
 
 function formatGmailApiError(status: number, body: string) {
@@ -239,9 +227,9 @@ function boxedLines(title: string, bodyLines: string[], footer: string, width: n
 }
 
 function actionForKey(data: string, actions: EmailAction[]): EmailAction | undefined {
-  if (matchesKey(data, Key.enter)) return actions.includes("unsubscribeArchive") ? "unsubscribeArchive" : "archive";
-  if (matchesKey(data, Key.escape) || data === "q") return "escape";
-  if (data === "j") return "skip";
+  if (matchesKey(data, Key.enter) && actions.includes("archive")) return "archive";
+  if ((matchesKey(data, Key.escape) || data === "q") && actions.includes("escape")) return "escape";
+  if (data === "j" && actions.includes("skip")) return "skip";
   if (data === "k" && actions.includes("previous")) return "previous";
   if (data === "J" && actions.includes("jumpNext")) return "jumpNext";
   if (data === "K" && actions.includes("jumpPrevious")) return "jumpPrevious";
@@ -269,40 +257,6 @@ function wrapDisplayLines(lines: string[], width: number) {
   });
 }
 
-async function chooseEmailAction(
-  ctx: any,
-  title: string,
-  body: string,
-  actions: EmailAction[],
-): Promise<EmailAction> {
-  return await ctx.ui.custom<EmailAction>((tui: { requestRender: () => void }, theme: any, _keybindings: unknown, done: (value: EmailAction) => void) => {
-    let showHelp = false;
-    const render = (width: number) => {
-      const bodyLines = body.split("\n");
-      if (showHelp) {
-        bodyLines.push("", "Shortcuts:");
-        for (const action of actions) bodyLines.push(`  ${EMAIL_ACTIONS[action].keys.join(" / ")} — ${EMAIL_ACTIONS[action].label}`);
-        bodyLines.push("  ? — Toggle this legend");
-      }
-      return boxedLines(title, bodyLines, `${actionLegend(actions)}  ·  ? Help`, width, theme);
-    };
-
-    return {
-      render,
-      handleInput(data: string) {
-        if (data === "?") {
-          showHelp = !showHelp;
-          tui.requestRender();
-          return;
-        }
-        const action = actionForKey(data, actions);
-        if (action) done(action);
-      },
-      invalidate() {},
-    };
-  }, emailOverlayOptions());
-}
-
 function gmailSearchUrl(query: string) {
   return `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
 }
@@ -310,22 +264,27 @@ function gmailSearchUrl(query: string) {
 async function confirmBulkAction(ctx: any, actionLabel: string, item: InboxSweepItem) {
   type BulkSelection = Awaited<ReturnType<typeof collectSimilarInboxSelection>>;
   type BulkResult = { confirmed: true; selection: BulkSelection } | { confirmed: false };
-  const queries = [similarInboxQuery(item), broadSimilarInboxQuery(item)].filter((query, index, list) => list.indexOf(query) === index);
+  const queries = uniqueValues([similarInboxQuery(item), broadSimilarInboxQuery(item)]);
 
   return await ctx.ui.custom<BulkResult>((tui: { requestRender: () => void }, theme: any, _keybindings: unknown, done: (value: BulkResult) => void) => {
     let queryIndex = 0;
     let selection: BulkSelection | null = null;
     let loading = "Loading matching threads…";
+    let loadVersion = 0;
 
     const load = async () => {
+      const version = ++loadVersion;
       const query = queries[queryIndex] ?? queries[0]!;
       loading = `Loading matches for: ${query}`;
       selection = null;
       tui.requestRender();
       try {
-        selection = await collectSimilarInboxSelection(item, query);
+        const nextSelection = await collectSimilarInboxSelection(item, query);
+        if (version !== loadVersion) return;
+        selection = nextSelection;
         loading = "";
       } catch (error) {
+        if (version !== loadVersion) return;
         loading = `Failed to load matches: ${error instanceof Error ? error.message : String(error)}`;
       }
       tui.requestRender();
@@ -406,37 +365,6 @@ async function gmailPost<T>(path: string, accessToken: string, body: unknown): P
   return gmailRequest<T>("POST", path, accessToken, body);
 }
 
-async function collectInbox(maxResults = 10): Promise<InboxItem[]> {
-  const accessToken = await getAccessToken();
-  const list = await gmailGet<{ messages?: Array<{ id: string; threadId: string }> }>(
-    `/users/me/messages?${new URLSearchParams({ q: "in:inbox is:unread", maxResults: String(maxResults) })}`,
-    accessToken,
-  );
-
-  const items: InboxItem[] = [];
-  for (const message of list.messages ?? []) {
-    const full = await gmailGet<{
-      id: string;
-      threadId: string;
-      labelIds?: string[];
-      snippet?: string;
-      payload?: { headers?: Array<{ name?: string; value?: string }> };
-    }>(`/users/me/messages/${message.id}?${new URLSearchParams({ format: "metadata" })}`, accessToken);
-
-    items.push({
-      id: full.id,
-      threadId: full.threadId,
-      from: headerValue(full.payload?.headers, "From"),
-      subject: headerValue(full.payload?.headers, "Subject"),
-      date: headerValue(full.payload?.headers, "Date"),
-      snippet: full.snippet ?? "",
-      labelIds: full.labelIds ?? [],
-    });
-  }
-
-  return items;
-}
-
 type GmailPayload = {
   mimeType?: string;
   body?: { data?: string };
@@ -451,21 +379,9 @@ type SenderInboxThread = {
   snippet: string;
 };
 
-type UnsubscribeCandidate = {
-  sender: string;
-  senderEmail: string;
-  latestMessageId: string;
-  latestThreadId: string;
-  subject: string;
-  date: string;
-  snippet: string;
-  listUnsubscribe: string;
-  unsubscribeUrls: string[];
-  unsubscribeMailtos: string[];
-  chosenUrl?: string;
-  inboxThreads: SenderInboxThread[];
-  archiveThreadIds: string[];
-  countInboxThreadsFromSender: number;
+type GmailThreadModifyBody = {
+  addLabelIds?: string[];
+  removeLabelIds?: string[];
 };
 
 function senderEmail(from: string) {
@@ -498,15 +414,11 @@ function cleanEmailText(text: string) {
 }
 
 function extractHttpUrls(text: string) {
-  return [...text.matchAll(/https?:\/\/[^\s"'<>]+/gi)]
-    .map((match) => match[0].replace(/&amp;/g, "&").replace(/[),.;]+$/, ""))
-    .filter((url, index, urls) => /unsubscribe|preferences|email-preference/i.test(url) && urls.indexOf(url) === index);
-}
-
-function extractMailtos(text: string) {
-  return [...text.matchAll(/mailto:[^\s"'<>]+/gi)]
-    .map((match) => match[0].replace(/&amp;/g, "&").replace(/[),.;]+$/, ""))
-    .filter((url, index, urls) => urls.indexOf(url) === index);
+  return uniqueValues(
+    [...text.matchAll(/https?:\/\/[^\s"'<>]+/gi)]
+      .map((match) => match[0].replace(/&amp;/g, "&").replace(/[),.;]+$/, ""))
+      .filter((url) => /unsubscribe|preferences|email-preference/i.test(url)),
+  );
 }
 
 async function listThreadIds(query: string, accessToken: string): Promise<string[]> {
@@ -527,40 +439,36 @@ async function listThreadIds(query: string, accessToken: string): Promise<string
   return ids;
 }
 
-async function markThreadIdsRead(threadIds: string[], accessToken: string) {
-  for (const threadId of threadIds) {
+async function modifyThreadIds(threadIds: string[], accessToken: string, body: GmailThreadModifyBody) {
+  for (const threadId of uniqueValues(threadIds)) {
     await gmailPost(`/users/me/threads/${encodeURIComponent(threadId)}/modify`, accessToken, {
-      removeLabelIds: ["UNREAD"],
+      ...body,
     });
   }
+}
+
+async function markThreadIdsRead(threadIds: string[], accessToken: string) {
+  await modifyThreadIds(threadIds, accessToken, { removeLabelIds: ["UNREAD"] });
 }
 
 async function archiveThreadIds(threadIds: string[]) {
   if (threadIds.length === 0) return;
   const accessToken = await getAccessToken();
-  for (const threadId of threadIds) {
-    await gmailPost(`/users/me/threads/${encodeURIComponent(threadId)}/modify`, accessToken, {
-      removeLabelIds: ["INBOX", "UNREAD"],
-    });
-  }
+  await modifyThreadIds(threadIds, accessToken, { removeLabelIds: ["INBOX", "UNREAD"] });
 }
 
 async function spamThreadIds(threadIds: string[]) {
   if (threadIds.length === 0) return;
   const accessToken = await getAccessToken();
-  for (const threadId of threadIds) {
-    await gmailPost(`/users/me/threads/${encodeURIComponent(threadId)}/modify`, accessToken, {
-      addLabelIds: ["SPAM"],
-      removeLabelIds: ["INBOX", "UNREAD"],
-    });
-  }
+  await modifyThreadIds(threadIds, accessToken, { addLabelIds: ["SPAM"], removeLabelIds: ["INBOX", "UNREAD"] });
 }
 
 async function trashThreadIds(threadIds: string[]) {
-  if (threadIds.length === 0) return;
+  const uniqueThreadIds = uniqueValues(threadIds);
+  if (uniqueThreadIds.length === 0) return;
   const accessToken = await getAccessToken();
-  await markThreadIdsRead(threadIds, accessToken);
-  for (const threadId of threadIds) {
+  await markThreadIdsRead(uniqueThreadIds, accessToken);
+  for (const threadId of uniqueThreadIds) {
     await gmailPost(`/users/me/threads/${encodeURIComponent(threadId)}/trash`, accessToken, {});
   }
 }
@@ -587,32 +495,6 @@ async function collectThreadSummaries(threadIds: string[], accessToken: string):
   return summaries;
 }
 
-function formatThreadTitles(threads: SenderInboxThread[]) {
-  return threads.map((thread, index) => `${index + 1}. ${thread.subject || "(no subject)"}`).join("\n");
-}
-
-function formatCandidatePrompt(candidate: UnsubscribeCandidate) {
-  return [
-    `${candidate.senderEmail} — ${candidate.countInboxThreadsFromSender} inbox thread(s)`,
-    candidate.sender && candidate.sender !== candidate.senderEmail ? `From: ${candidate.sender}` : undefined,
-    `Newest unsubscribe email: ${candidate.subject || "(no subject)"}`,
-    "Inbox titles:",
-    formatThreadTitles(candidate.inboxThreads),
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
-
-function formatCandidateSummary(candidate: UnsubscribeCandidate) {
-  return [
-    `${candidate.senderEmail} — ${candidate.countInboxThreadsFromSender} inbox thread(s)`,
-    `Newest unsubscribe email: ${candidate.subject || "(no subject)"}`,
-    "Inbox titles:",
-    formatThreadTitles(candidate.inboxThreads),
-    candidate.chosenUrl ? `Unsubscribe: ${candidate.chosenUrl}` : "No HTTP unsubscribe URL found.",
-  ].join("\n");
-}
-
 async function collectInboxSweepItemFromMessage(message: { id: string; threadId: string }, accessToken: string): Promise<InboxSweepItem> {
   const full = await gmailGet<{
     id: string;
@@ -624,9 +506,7 @@ async function collectInboxSweepItemFromMessage(message: { id: string; threadId:
   const from = headerValue(full.payload?.headers, "From");
   const listUnsubscribe = headerValue(full.payload?.headers, "List-Unsubscribe");
   const rawBodyText = collectPayloadText(full.payload);
-  const unsubscribeUrls = [...extractHttpUrls(listUnsubscribe), ...extractHttpUrls(rawBodyText)].filter(
-    (url, index, urls) => urls.indexOf(url) === index,
-  );
+  const unsubscribeUrls = uniqueValues([...extractHttpUrls(listUnsubscribe), ...extractHttpUrls(rawBodyText)]);
 
   return {
     messageId: full.id,
@@ -693,15 +573,6 @@ async function collectNewestInboxSweepItem(excludedThreadIds = new Set<string>()
   return (await collectInboxSweepItemAtOffset(0, excludedThreadIds)).item;
 }
 
-function firstReadableExcerpt(item: InboxSweepItem) {
-  const text = (item.bodyText || item.snippet || "").trim();
-  if (!text) return "No preview text.";
-
-  const paragraph = text.split(/\n\s*\n/).find((part) => part.trim()) ?? text;
-  const sentence = paragraph.match(/^.{40,}?[.!?](?:\s|$)/)?.[0] ?? paragraph;
-  return sentence.replace(/\s+/g, " ").trim().slice(0, 700);
-}
-
 function formatInboxSweepPrompt(item: InboxSweepItem) {
   const query = `in:inbox from:${item.senderEmail}`;
   const body = (item.bodyText || item.snippet || "No preview text.").trim();
@@ -734,8 +605,8 @@ const SUBJECT_STOPWORDS = new Set([
 ]);
 
 function subjectKeywords(subject: string) {
-  return (subject.toLowerCase().match(/[a-z0-9]{4,}/g) ?? [])
-    .filter((word, index, words) => !SUBJECT_STOPWORDS.has(word) && words.indexOf(word) === index)
+  return uniqueValues(subject.toLowerCase().match(/[a-z0-9]{4,}/g) ?? [])
+    .filter((word) => !SUBJECT_STOPWORDS.has(word))
     .slice(0, 4);
 }
 
@@ -754,76 +625,19 @@ async function collectInboxThreadIdsFromSender(item: InboxSweepItem) {
   const threadIds = await listThreadIds(query, await getAccessToken());
   return {
     query,
-    threadIds: [item.threadId, ...threadIds].filter((threadId, index, ids) => ids.indexOf(threadId) === index),
+    threadIds: uniqueValues([item.threadId, ...threadIds]),
   };
 }
 
 async function collectSimilarInboxSelection(item: InboxSweepItem, query: string) {
   const accessToken = await getAccessToken();
   const threadIds = await listThreadIds(query, accessToken);
-  const uniqueThreadIds = [item.threadId, ...threadIds].filter((threadId, index, ids) => ids.indexOf(threadId) === index);
+  const uniqueThreadIds = uniqueValues([item.threadId, ...threadIds]);
   return {
     query,
     threadIds: uniqueThreadIds,
     summaries: await collectThreadSummaries(uniqueThreadIds, accessToken),
   };
-}
-
-async function collectUnsubscribeCandidates(maxSenders = 10, excludedSenders = new Set<string>()): Promise<UnsubscribeCandidate[]> {
-  const accessToken = await getAccessToken();
-  const list = await gmailGet<{ messages?: Array<{ id: string; threadId: string }> }>(
-    `/users/me/messages?${new URLSearchParams({ q: "in:inbox unsubscribe", maxResults: String(Math.min(Math.max(maxSenders * 10, 50), 100)) })}`,
-    accessToken,
-  );
-
-  const seenSenders = new Set<string>();
-  const candidates: UnsubscribeCandidate[] = [];
-
-  for (const message of list.messages ?? []) {
-    if (candidates.length >= maxSenders) break;
-    const full = await gmailGet<{
-      id: string;
-      threadId: string;
-      snippet?: string;
-      payload?: GmailPayload;
-    }>(`/users/me/messages/${message.id}?${new URLSearchParams({ format: "full" })}`, accessToken);
-
-    const from = headerValue(full.payload?.headers, "From");
-    const email = senderEmail(from);
-    if (!email || seenSenders.has(email) || excludedSenders.has(email)) continue;
-    seenSenders.add(email);
-
-    const listUnsubscribe = headerValue(full.payload?.headers, "List-Unsubscribe");
-    const bodyText = collectPayloadText(full.payload);
-    const headerUrls = extractHttpUrls(listUnsubscribe);
-    const bodyUrls = extractHttpUrls(bodyText);
-    const unsubscribeUrls = [...headerUrls, ...bodyUrls].filter((url, index, urls) => urls.indexOf(url) === index);
-    const unsubscribeMailtos = [...extractMailtos(listUnsubscribe), ...extractMailtos(bodyText)].filter(
-      (url, index, urls) => urls.indexOf(url) === index,
-    );
-    const matchingThreadIds = await listThreadIds(`in:inbox from:${email}`, accessToken);
-    const archiveThreadIds = [full.threadId, ...matchingThreadIds].filter((id, index, ids) => ids.indexOf(id) === index);
-    const inboxThreads = await collectThreadSummaries(archiveThreadIds, accessToken);
-
-    candidates.push({
-      sender: from,
-      senderEmail: email,
-      latestMessageId: full.id,
-      latestThreadId: full.threadId,
-      subject: headerValue(full.payload?.headers, "Subject"),
-      date: headerValue(full.payload?.headers, "Date"),
-      snippet: full.snippet ?? "",
-      listUnsubscribe,
-      unsubscribeUrls,
-      unsubscribeMailtos,
-      chosenUrl: unsubscribeUrls[0],
-      inboxThreads,
-      archiveThreadIds,
-      countInboxThreadsFromSender: archiveThreadIds.length,
-    });
-  }
-
-  return candidates;
 }
 
 async function runInboxSweep(ctx: any) {
@@ -1141,7 +955,11 @@ async function startOAuthFlow(): Promise<GmailToken> {
     const server = createServer(async (req, res) => {
       try {
         const url = new URL(req.url ?? "/", REDIRECT_URI);
-        if (url.pathname !== "/oauth2/callback") return;
+        if (url.pathname !== "/oauth2/callback") {
+          res.writeHead(404, { "content-type": "text/plain" });
+          res.end("Not found.\n");
+          return;
+        }
 
         if (url.searchParams.get("state") !== state) throw new Error("OAuth state mismatch.");
         const code = url.searchParams.get("code");
@@ -1160,8 +978,11 @@ async function startOAuthFlow(): Promise<GmailToken> {
     });
 
     server.once("error", reject);
-    server.listen(REDIRECT_PORT, "127.0.0.1", async () => {
-      await execFileAsync("open", [authUrl.toString()]);
+    server.listen(REDIRECT_PORT, "127.0.0.1", () => {
+      execFileAsync("open", [authUrl.toString()]).catch((error) => {
+        server.close();
+        reject(error);
+      });
     });
   });
 }
@@ -1244,8 +1065,6 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-
-
   pi.registerTool({
     name: "email_status",
     label: "Email Status",
@@ -1261,12 +1080,6 @@ export default function (pi: ExtensionAPI) {
           backend: "gmail",
           tokenStorage: "macOS Keychain",
           scopes: GMAIL_SCOPES,
-          localModel: {
-            provider: "ollama",
-            model: OLLAMA_EMAIL_MODEL,
-            baseUrl: OLLAMA_API_BASE,
-            keepAlive: OLLAMA_KEEP_ALIVE,
-          },
         },
       };
     },

@@ -2,7 +2,7 @@
   "name": "pi-extension-email",
   "private": true,
   "version": "0.1.0",
-  "description": "Email-focused pi extension scaffold.",
+  "description": "Gmail triage extension for Pi.",
   "pi": {
     "extensions": ["./index.ts"]
   }
