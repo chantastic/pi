@@ -62,8 +62,8 @@ http://127.0.0.1:53682/oauth2/callback
   - `U` — Open detected unsubscribe link and archive all inbox threads from that sender
   - `j` — Next message
   - `k` — Previous loaded message
-  - `J` — Jump next 10 messages
-  - `K` — Jump previous 10 loaded messages
+  - `J` — Jump directly to the 10th next message
+  - `K` — Jump directly to the 10th previous loaded message
   - `↑` / `↓` — Scroll message pane
   - `PageUp` / `PageDown`, `Ctrl-U` / `Ctrl-D` — Jump message pane
   - `q` / `Esc` — Escape

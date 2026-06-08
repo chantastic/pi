@@ -613,12 +613,48 @@ function formatCandidateSummary(candidate: UnsubscribeCandidate) {
   ].join("\n");
 }
 
-async function collectNewestInboxSweepItem(excludedThreadIds = new Set<string>()): Promise<InboxSweepItem | null> {
+async function collectInboxSweepItemFromMessage(message: { id: string; threadId: string }, accessToken: string): Promise<InboxSweepItem> {
+  const full = await gmailGet<{
+    id: string;
+    threadId: string;
+    snippet?: string;
+    payload?: GmailPayload;
+  }>(`/users/me/messages/${message.id}?${new URLSearchParams({ format: "full" })}`, accessToken);
+
+  const from = headerValue(full.payload?.headers, "From");
+  const listUnsubscribe = headerValue(full.payload?.headers, "List-Unsubscribe");
+  const rawBodyText = collectPayloadText(full.payload);
+  const unsubscribeUrls = [...extractHttpUrls(listUnsubscribe), ...extractHttpUrls(rawBodyText)].filter(
+    (url, index, urls) => urls.indexOf(url) === index,
+  );
+
+  return {
+    messageId: full.id,
+    threadId: full.threadId,
+    from,
+    senderEmail: senderEmail(from),
+    subject: headerValue(full.payload?.headers, "Subject"),
+    date: headerValue(full.payload?.headers, "Date"),
+    snippet: full.snippet ?? "",
+    bodyText: cleanEmailText(rawBodyText),
+    unsubscribeUrls,
+    chosenUnsubscribeUrl: unsubscribeUrls[0],
+  };
+}
+
+async function collectInboxSweepItemAtOffset(
+  offset: number,
+  excludedThreadIds = new Set<string>(),
+): Promise<{ item: InboxSweepItem | null; skippedThreadIds: string[] }> {
   const accessToken = await getAccessToken();
+  const seenThreadIds = new Set(excludedThreadIds);
+  const skippedThreadIds: string[] = [];
   let pageToken: string | undefined;
+  let remaining = Math.max(0, offset);
+  let lastCandidate: { id: string; threadId: string } | null = null;
 
   do {
-    const params = new URLSearchParams({ q: "in:inbox", maxResults: "50" });
+    const params = new URLSearchParams({ q: "in:inbox", maxResults: "100" });
     if (pageToken) params.set("pageToken", pageToken);
     const page = await gmailGet<{ messages?: Array<{ id: string; threadId: string }>; nextPageToken?: string }>(
       `/users/me/messages?${params}`,
@@ -626,39 +662,35 @@ async function collectNewestInboxSweepItem(excludedThreadIds = new Set<string>()
     );
 
     for (const message of page.messages ?? []) {
-      if (excludedThreadIds.has(message.threadId)) continue;
-      const full = await gmailGet<{
-        id: string;
-        threadId: string;
-        snippet?: string;
-        payload?: GmailPayload;
-      }>(`/users/me/messages/${message.id}?${new URLSearchParams({ format: "full" })}`, accessToken);
-      if (excludedThreadIds.has(full.threadId)) continue;
+      if (seenThreadIds.has(message.threadId)) continue;
+      seenThreadIds.add(message.threadId);
+      lastCandidate = message;
 
-      const from = headerValue(full.payload?.headers, "From");
-      const listUnsubscribe = headerValue(full.payload?.headers, "List-Unsubscribe");
-      const rawBodyText = collectPayloadText(full.payload);
-      const unsubscribeUrls = [...extractHttpUrls(listUnsubscribe), ...extractHttpUrls(rawBodyText)].filter(
-        (url, index, urls) => urls.indexOf(url) === index,
-      );
+      if (remaining > 0) {
+        skippedThreadIds.push(message.threadId);
+        remaining--;
+        continue;
+      }
+
       return {
-        messageId: full.id,
-        threadId: full.threadId,
-        from,
-        senderEmail: senderEmail(from),
-        subject: headerValue(full.payload?.headers, "Subject"),
-        date: headerValue(full.payload?.headers, "Date"),
-        snippet: full.snippet ?? "",
-        bodyText: cleanEmailText(rawBodyText),
-        unsubscribeUrls,
-        chosenUnsubscribeUrl: unsubscribeUrls[0],
+        item: await collectInboxSweepItemFromMessage(message, accessToken),
+        skippedThreadIds,
       };
     }
 
     pageToken = page.nextPageToken;
   } while (pageToken);
 
-  return null;
+  if (!lastCandidate) return { item: null, skippedThreadIds };
+
+  return {
+    item: await collectInboxSweepItemFromMessage(lastCandidate, accessToken),
+    skippedThreadIds: skippedThreadIds.filter((threadId) => threadId !== lastCandidate!.threadId),
+  };
+}
+
+async function collectNewestInboxSweepItem(excludedThreadIds = new Set<string>()): Promise<InboxSweepItem | null> {
+  return (await collectInboxSweepItemAtOffset(0, excludedThreadIds)).item;
 }
 
 function firstReadableExcerpt(item: InboxSweepItem) {
@@ -797,6 +829,7 @@ async function collectUnsubscribeCandidates(maxSenders = 10, excludedSenders = n
 async function runInboxSweep(ctx: any) {
   await ctx.ui.custom<void>((tui: { requestRender: () => void }, theme: any, _kb: unknown, done: () => void) => {
     const removedThreadIds = new Set<string>();
+    const passedThreadIds = new Set<string>();
     const items: InboxSweepItem[] = [];
     let currentIndex = -1;
     let item: InboxSweepItem | null = null;
@@ -810,6 +843,7 @@ async function runInboxSweep(ctx: any) {
 
     const excludedForNext = () => {
       const excluded = new Set(removedThreadIds);
+      for (const threadId of passedThreadIds) excluded.add(threadId);
       for (const cached of items) excluded.add(cached.threadId);
       return excluded;
     };
@@ -818,6 +852,7 @@ async function runInboxSweep(ctx: any) {
       nextItemPromise = collectNewestInboxSweepItem(excludedForNext()).then((prefetched) => {
         if (!prefetched) return null;
         if (removedThreadIds.has(prefetched.threadId)) return null;
+        if (passedThreadIds.has(prefetched.threadId)) return null;
         if (items.some((cached) => cached.threadId === prefetched.threadId)) return null;
         return prefetched;
       }).catch((error) => {
@@ -837,46 +872,64 @@ async function runInboxSweep(ctx: any) {
     const loadNextInboxItem = async (usePrefetch: boolean) => {
       const prefetched = usePrefetch && nextItemPromise ? await nextItemPromise : null;
       nextItemPromise = null;
-      if (prefetched && !removedThreadIds.has(prefetched.threadId) && !items.some((cached) => cached.threadId === prefetched.threadId)) {
+      if (
+        prefetched &&
+        !removedThreadIds.has(prefetched.threadId) &&
+        !passedThreadIds.has(prefetched.threadId) &&
+        !items.some((cached) => cached.threadId === prefetched.threadId)
+      ) {
         return prefetched;
       }
       return await collectNewestInboxSweepItem(excludedForNext());
     };
 
+    const loadJumpInboxItem = async (offset: number) => {
+      nextItemPromise = null;
+      const result = await collectInboxSweepItemAtOffset(offset, excludedForNext());
+      for (const threadId of result.skippedThreadIds) passedThreadIds.add(threadId);
+      return result.item;
+    };
+
     const showNext = async (count = 1, usePrefetch = true) => {
       processing = true;
-      message = count > 1 ? `Loading next ${count} inbox emails…` : "Loading next inbox email…";
+      message = count > 1 ? `Jumping ahead ${count} inbox emails…` : "Loading next inbox email…";
       tui.requestRender();
 
-      let moved = false;
-      for (let step = 0; step < count; step++) {
-        if (currentIndex < items.length - 1) {
-          currentIndex++;
-          setCurrentItem(items[currentIndex]!);
-          moved = true;
-          continue;
-        }
-
-        const next = await loadNextInboxItem(usePrefetch && step === 0);
-        if (!next) break;
-        items.push(next);
-        currentIndex = items.length - 1;
-        considered++;
-        setCurrentItem(next);
-        moved = true;
+      const futureCount = Math.max(0, items.length - currentIndex - 1);
+      if (count <= futureCount) {
+        currentIndex += count;
+        setCurrentItem(items[currentIndex]!);
+        processing = false;
+        prefetchNext();
+        tui.requestRender();
+        return;
       }
 
+      const remaining = count - futureCount;
+      if (futureCount > 0) {
+        currentIndex = items.length - 1;
+        setCurrentItem(items[currentIndex]!);
+      }
+
+      const next = remaining === 1 ? await loadNextInboxItem(usePrefetch) : await loadJumpInboxItem(remaining - 1);
       processing = false;
-      if (!moved) {
+
+      if (!next) {
         if (!item) {
           ctx.ui.notify(considered === 0 ? "No inbox emails found." : "inbox sweep complete", "info");
           done();
           return;
         }
         message = "No more inbox emails loaded.";
-      } else {
-        prefetchNext();
+        tui.requestRender();
+        return;
       }
+
+      items.push(next);
+      currentIndex = items.length - 1;
+      considered++;
+      setCurrentItem(next);
+      prefetchNext();
       tui.requestRender();
     };
 
