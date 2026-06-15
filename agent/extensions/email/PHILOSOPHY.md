@@ -19,6 +19,7 @@ This extension is a fast human-in-the-loop Gmail triage surface. It should help 
 - Sender-wide and bulk actions must include the current thread, even when Gmail search results do not return it.
 - Thread IDs and URLs should be de-duplicated before action execution.
 - Unsubscribe URLs are opened in the user's browser. The extension should not fetch unsubscribe pages, click remote forms, or send `mailto:` unsubscribe requests without a separate explicit confirmation flow.
+- Reply actions should either hand off to Gmail in the browser or use a local compose/draft flow with an explicit send confirmation. Never send mail as a side effect of triage navigation.
 - Prefetching is allowed for speed, but prefetched items must never reintroduce removed, skipped, or already cached threads.
 
 ## Architecture boundaries
@@ -27,7 +28,7 @@ The current implementation still lives in one file, but future changes should pr
 
 - Auth and storage: Google OAuth, token refresh, and Keychain helpers.
 - Gmail transport: `gmailGet`, `gmailPost`, error formatting, and access-token-aware request helpers.
-- Gmail domain operations: thread listing, thread summaries, archive/spam/trash, sender and similar-message selection.
+- Gmail domain operations: thread listing, thread summaries, archive/spam/trash, reply sending, sender and similar-message selection.
 - Message parsing: headers, sender email extraction, payload text decoding, HTML cleanup, unsubscribe URL extraction.
 - Triage policy: actions, keybindings, Gmail search query construction, stopwords, and bulk confirmation rules.
 - TUI shell: full-screen overlay rendering, scroll state, message cache, prefetch, and keyboard handling.

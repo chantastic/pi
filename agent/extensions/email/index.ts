@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import { Editor, type EditorTheme, Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
@@ -20,6 +20,7 @@ type EmailAction =
   | "spam"
   | "archiveSimilar"
   | "trashSimilar"
+  | "replyNext"
   | "unsubscribeOpen"
   | "unsubscribeArchiveSender"
   | "skip"
@@ -34,6 +35,7 @@ const EMAIL_ACTIONS: Record<EmailAction, { label: string; keys: string[] }> = {
   spam: { label: "Spam", keys: ["!"] },
   archiveSimilar: { label: "Archive messages like this", keys: ["E"] },
   trashSimilar: { label: "Trash messages like this", keys: ["T"] },
+  replyNext: { label: "Reply and next", keys: ["r"] },
   unsubscribeOpen: { label: "Open unsubscribe link", keys: ["u"] },
   unsubscribeArchiveSender: { label: "Open unsubscribe and archive sender", keys: ["U"] },
   skip: { label: "Next", keys: ["j"] },
@@ -49,6 +51,7 @@ const INBOX_SWEEP_ACTIONS: EmailAction[] = [
   "trash",
   "trashSimilar",
   "spam",
+  "replyNext",
   "unsubscribeOpen",
   "unsubscribeArchiveSender",
   "skip",
@@ -180,6 +183,9 @@ type InboxSweepItem = {
   date: string;
   snippet: string;
   bodyText: string;
+  replyTo: string;
+  messageIdHeader: string;
+  referencesHeader: string;
   unsubscribeUrls: string[];
   chosenUnsubscribeUrl?: string;
 };
@@ -238,6 +244,7 @@ function actionForKey(data: string, actions: EmailAction[]): EmailAction | undef
   if (data === "!" && actions.includes("spam")) return "spam";
   if (data === "E" && actions.includes("archiveSimilar")) return "archiveSimilar";
   if (data === "T" && actions.includes("trashSimilar")) return "trashSimilar";
+  if (data === "r" && actions.includes("replyNext")) return "replyNext";
   if (data === "u" && actions.includes("unsubscribeOpen")) return "unsubscribeOpen";
   if (data === "U" && actions.includes("unsubscribeArchiveSender")) return "unsubscribeArchiveSender";
   return undefined;
@@ -343,6 +350,80 @@ function emailOverlayOptions() {
   };
 }
 
+type ReplyComposeResult = { send: true; body: string } | { send: false };
+
+async function composeReply(ctx: any, item: InboxSweepItem): Promise<ReplyComposeResult> {
+  return await ctx.ui.custom<ReplyComposeResult>((tui: any, theme: any, _keybindings: unknown, done: (value: ReplyComposeResult) => void) => {
+    const editorTheme: EditorTheme = {
+      borderColor: (text) => theme?.fg ? theme.fg("accent", text) : text,
+      selectList: {
+        selectedPrefix: (text) => theme?.fg ? theme.fg("accent", text) : text,
+        selectedText: (text) => theme?.fg ? theme.fg("accent", text) : text,
+        description: (text) => theme?.fg ? theme.fg("muted", text) : text,
+        scrollInfo: (text) => theme?.fg ? theme.fg("dim", text) : text,
+        noMatch: (text) => theme?.fg ? theme.fg("warning", text) : text,
+      },
+    };
+    const editor = new Editor(tui, editorTheme, { paddingX: 1 });
+    editor.focused = true;
+    editor.disableSubmit = true;
+    let message = "";
+
+    const submit = () => {
+      const body = editor.getExpandedText().trim();
+      if (!body) {
+        message = "Write a reply before sending.";
+        tui.requestRender();
+        return;
+      }
+      done({ send: true, body });
+    };
+
+    return {
+      render(width: number) {
+        const innerWidth = Math.max(20, width - 4);
+        const topTitle = " Reply ";
+        const top = "┌" + topTitle + "─".repeat(Math.max(0, width - topTitle.length - 2)) + "┐";
+        const bottom = borderLine(width, "└", "─", "┘");
+        const separator = borderLine(width, "├", "─", "┤");
+        const headerLines = [
+          `To: ${item.replyTo || item.from || item.senderEmail}`,
+          `Subject: ${replySubject(item.subject)}`,
+          item.subject ? `Thread: ${item.subject}` : undefined,
+          message ? "" : undefined,
+          message || undefined,
+        ].filter((line) => line !== undefined) as string[];
+        const header = headerLines.map((line) => `│ ${truncateToWidth(line, innerWidth).padEnd(innerWidth)} │`);
+        const editorLines = editor.render(innerWidth).map((line) => `│ ${truncateToWidth(line, innerWidth).padEnd(innerWidth)} │`);
+        const footerText = "Ctrl-S/Ctrl-X Send  ·  Esc Cancel  ·  Enter New Line";
+        const footer = `│ ${truncateToWidth(footerText, innerWidth).padEnd(innerWidth)} │`;
+        return [theme?.fg ? theme.fg("accent", top) : top, ...header, separator, ...editorLines, separator, theme?.fg ? theme.fg("muted", footer) : footer, bottom];
+      },
+      handleInput(data: string) {
+        message = "";
+        if (matchesKey(data, Key.escape)) {
+          done({ send: false });
+          return;
+        }
+        if (matchesKey(data, Key.ctrl("s")) || matchesKey(data, Key.ctrl("x"))) {
+          submit();
+          return;
+        }
+        if (matchesKey(data, Key.enter)) {
+          editor.insertTextAtCursor("\n");
+          tui.requestRender();
+          return;
+        }
+        editor.handleInput(data);
+        tui.requestRender();
+      },
+      invalidate() {
+        editor.invalidate();
+      },
+    };
+  }, emailOverlayOptions());
+}
+
 async function gmailRequest<T>(method: "GET" | "POST", path: string, accessToken: string, body?: unknown): Promise<T> {
   const response = await fetch(`${GMAIL_API_BASE}${path}`, {
     method,
@@ -394,23 +475,98 @@ function decodeBase64Url(data: string) {
   return Buffer.from(data.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
 }
 
-function collectPayloadText(payload: GmailPayload | undefined): string {
-  if (!payload) return "";
-  const own = payload.body?.data ? decodeBase64Url(payload.body.data) : "";
-  return [own, ...(payload.parts ?? []).map(collectPayloadText)].filter(Boolean).join("\n");
+function collectPayloadTexts(payload: GmailPayload | undefined): { plain: string[]; html: string[]; other: string[] } {
+  if (!payload) return { plain: [], html: [], other: [] };
+
+  const nested = (payload.parts ?? []).map(collectPayloadTexts).reduce(
+    (acc, part) => ({
+      plain: [...acc.plain, ...part.plain],
+      html: [...acc.html, ...part.html],
+      other: [...acc.other, ...part.other],
+    }),
+    { plain: [] as string[], html: [] as string[], other: [] as string[] },
+  );
+
+  if (!payload.body?.data) return nested;
+
+  const text = decodeBase64Url(payload.body.data);
+  const mimeType = payload.mimeType?.toLowerCase() ?? "";
+  if (mimeType === "text/plain") nested.plain.push(text);
+  else if (mimeType === "text/html") nested.html.push(text);
+  else nested.other.push(text);
+  return nested;
 }
 
-function cleanEmailText(text: string) {
+function collectPreferredPayloadText(payload: GmailPayload | undefined): string {
+  const texts = collectPayloadTexts(payload);
+  const preferred = texts.plain.length > 0 ? texts.plain : texts.html.length > 0 ? texts.html : texts.other;
+  return preferred.filter(Boolean).join("\n");
+}
+
+function collectAllPayloadText(payload: GmailPayload | undefined): string {
+  const texts = collectPayloadTexts(payload);
+  return [...texts.plain, ...texts.html, ...texts.other].filter(Boolean).join("\n");
+}
+
+function decodeHtmlCodePoint(codePoint: number, fallback: string) {
+  return Number.isFinite(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : fallback;
+}
+
+function decodeHtmlEntities(text: string) {
   return text
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
+    .replace(/&#(\d+);/g, (match, code) => decodeHtmlCodePoint(Number(code), match))
+    .replace(/&#x([0-9a-f]+);/gi, (match, code) => decodeHtmlCodePoint(parseInt(code, 16), match))
     .replace(/&nbsp;/gi, " ")
     .replace(/&amp;/gi, "&")
     .replace(/&lt;/gi, "<")
     .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'");
+}
+
+function cleanEmailText(text: string) {
+  return decodeHtmlEntities(text)
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function sanitizeHeaderValue(value: string) {
+  return value.replace(/[\r\n]+/g, " ").trim();
+}
+
+function encodeMimeHeader(value: string) {
+  const sanitized = sanitizeHeaderValue(value);
+  return /^[\x20-\x7E]*$/.test(sanitized) ? sanitized : `=?UTF-8?B?${Buffer.from(sanitized, "utf8").toString("base64")}?=`;
+}
+
+function replySubject(subject: string) {
+  const sanitized = sanitizeHeaderValue(subject);
+  if (!sanitized) return "Re: (no subject)";
+  return /^re\s*:/i.test(sanitized) ? sanitized : `Re: ${sanitized}`;
+}
+
+function base64UrlEncode(value: string) {
+  return Buffer.from(value, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function buildReplyRawMessage(item: InboxSweepItem, body: string) {
+  const messageId = sanitizeHeaderValue(item.messageIdHeader);
+  const priorReferences = sanitizeHeaderValue(item.referencesHeader);
+  const references = [priorReferences, messageId].filter(Boolean).join(" ");
+  const headers = [
+    `To: ${sanitizeHeaderValue(item.replyTo || item.from || item.senderEmail)}`,
+    `Subject: ${encodeMimeHeader(replySubject(item.subject))}`,
+    messageId ? `In-Reply-To: ${messageId}` : undefined,
+    references ? `References: ${references}` : undefined,
+    "MIME-Version: 1.0",
+    "Content-Type: text/plain; charset=UTF-8",
+    "Content-Transfer-Encoding: 8bit",
+  ].filter((line) => line !== undefined);
+
+  return base64UrlEncode(`${headers.join("\r\n")}\r\n\r\n${body.trimEnd()}\r\n`);
 }
 
 function extractHttpUrls(text: string) {
@@ -495,6 +651,14 @@ async function collectThreadSummaries(threadIds: string[], accessToken: string):
   return summaries;
 }
 
+async function sendReply(item: InboxSweepItem, body: string) {
+  const accessToken = await getAccessToken();
+  return await gmailPost<{ id: string; threadId: string }>(`/users/me/messages/send`, accessToken, {
+    raw: buildReplyRawMessage(item, body),
+    threadId: item.threadId,
+  });
+}
+
 async function collectInboxSweepItemFromMessage(message: { id: string; threadId: string }, accessToken: string): Promise<InboxSweepItem> {
   const full = await gmailGet<{
     id: string;
@@ -504,9 +668,11 @@ async function collectInboxSweepItemFromMessage(message: { id: string; threadId:
   }>(`/users/me/messages/${message.id}?${new URLSearchParams({ format: "full" })}`, accessToken);
 
   const from = headerValue(full.payload?.headers, "From");
+  const replyTo = headerValue(full.payload?.headers, "Reply-To") || from;
   const listUnsubscribe = headerValue(full.payload?.headers, "List-Unsubscribe");
-  const rawBodyText = collectPayloadText(full.payload);
-  const unsubscribeUrls = uniqueValues([...extractHttpUrls(listUnsubscribe), ...extractHttpUrls(rawBodyText)]);
+  const rawBodyText = collectPreferredPayloadText(full.payload);
+  const allBodyText = collectAllPayloadText(full.payload);
+  const unsubscribeUrls = uniqueValues([...extractHttpUrls(listUnsubscribe), ...extractHttpUrls(allBodyText)]);
 
   return {
     messageId: full.id,
@@ -517,6 +683,9 @@ async function collectInboxSweepItemFromMessage(message: { id: string; threadId:
     date: headerValue(full.payload?.headers, "Date"),
     snippet: full.snippet ?? "",
     bodyText: cleanEmailText(rawBodyText),
+    replyTo,
+    messageIdHeader: headerValue(full.payload?.headers, "Message-ID"),
+    referencesHeader: headerValue(full.payload?.headers, "References"),
     unsubscribeUrls,
     chosenUnsubscribeUrl: unsubscribeUrls[0],
   };
@@ -821,6 +990,21 @@ async function runInboxSweep(ctx: any) {
           tui.requestRender();
           await spamThreadIds([current.threadId]);
           removeThreadIdsFromCache([current.threadId]);
+          await showNext(1, true);
+          return;
+        }
+        if (choice === "replyNext") {
+          const reply = await composeReply(ctx, current);
+          if (!reply.send) {
+            message = "Reply cancelled.";
+            tui.requestRender();
+            return;
+          }
+          processing = true;
+          message = `Sending reply to ${currentLabel(current)}…`;
+          tui.requestRender();
+          await sendReply(current, reply.body);
+          ctx.ui.notify(`sent reply to ${currentLabel(current)}`, "info");
           await showNext(1, true);
           return;
         }
