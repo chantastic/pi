@@ -1,14 +1,32 @@
 {
-  "lastChangelogVersion": "0.79.1",
-  "defaultProvider": "openai-codex",
-  "defaultModel": "gpt-5.5",
-  "defaultThinkingLevel": "low",
+  "lastChangelogVersion": "0.84.1",
+  "defaultProvider": "openai",
+  "defaultModel": "gpt-5.6-sol",
+  "defaultThinkingLevel": "high",
   "enableSkillCommands": true,
   "enabledModels": [
-    "gpt-5*",
-    "claude-*-4-6"
+    "openai/gpt-5.6-sol",
+    "cloudflare-ai-gateway/workers-ai/@cf/zai-org/glm-5.2",
+    "cloudflare-ai-gateway/claude-sonnet-5",
+    "cloudflare-ai-gateway/claude-fable-5",
+    "cloudflare-ai-gateway/claude-opus-5",
+    "cloudflare-ai-gateway/gpt-5.6-terra",
+    "cloudflare-ai-gateway/gpt-5.6-luna",
+    "cloudflare-ai-gateway/gpt-5.6-sol",
+    "cloudflare-ai-gateway/grok-4.3",
+    "cloudflare-ai-gateway/grok-4.20-0309-reasoning",
+    "cloudflare-ai-gateway/grok-4.20-0309-non-reasoning",
+    "cloudflare-ai-gateway/grok-4.20-multi-agent-0309",
+    "cloudflare-ai-gateway/grok-4.5",
+    "cloudflare-ai-gateway/grok-build-0.1",
+    "cloudflare-ai-gateway/grok-imagine-image",
+    "cloudflare-ai-gateway/grok-imagine-image-2.0",
+    "cloudflare-ai-gateway/grok-imagine-image-quality",
+    "cloudflare-ai-gateway/grok-imagine-video",
+    "cloudflare-ai-gateway/grok-imagine-video-1.5"
   ],
   "skills": [
     "~/.agents/skills"
-  ]
+  ],
+  "theme": "dark"
 }
