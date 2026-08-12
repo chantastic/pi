@@ -1,8 +1,17 @@
-# Secrets
+# Secrets and machine/work-specific configuration
 agent/auth.json
+agent/models.json
+agent/trust.json
 
-# Ephemeral
+# Ephemeral and generated state
 agent/sessions/
+agent/models-store.json
+.DS_Store
 
-# Binaries (installed by pi)
+# Managed integrations
+agent/extensions/herdr-agent-state.ts
+
+# Packages and binaries installed by pi
 agent/bin/
+agent/git/
+agent/npm/
