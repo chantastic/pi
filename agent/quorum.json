@@ -1,0 +1,28 @@
+{
+	"models": [
+		{
+			"label": "Claude",
+			"provider": "cloudflare-ai-gateway",
+			"modelId": "claude-fable-5"
+		},
+		{
+			"label": "OpenAI",
+			"provider": "cloudflare-ai-gateway",
+			"modelId": "gpt-5.6-sol"
+		},
+		{
+			"label": "Grok",
+			"provider": "cloudflare-ai-gateway",
+			"modelId": "$latest-grok-reasoning"
+		}
+	],
+	"chair": "Claude",
+	"reasoningEffort": "high",
+	"minimumPanelists": 2,
+	"maxSourceChars": 240000,
+	"outputTokens": {
+		"independent": 8192,
+		"deliberation": 8192,
+		"synthesis": 12288
+	}
+}
