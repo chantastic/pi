@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Editor, type EditorTheme, Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { execFile } from "node:child_process";
-import { createServer } from "node:http";
+import { createServer, type ServerResponse } from "node:http";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -11,6 +11,7 @@ const CONFIG_KEYCHAIN_SERVICE = "pi-email-gmail-config";
 const KEYCHAIN_ACCOUNT = "default";
 const REDIRECT_PORT = 53682;
 const REDIRECT_URI = `http://127.0.0.1:${REDIRECT_PORT}/oauth2/callback`;
+const OAUTH_FLOW_TIMEOUT_MS = 5 * 60 * 1000;
 const GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.modify"];
 const GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1";
 
@@ -1123,7 +1124,7 @@ async function runInboxSweep(ctx: any) {
   }, emailOverlayOptions());
 }
 
-async function exchangeCodeForToken(code: string): Promise<GmailToken> {
+async function exchangeCodeForToken(code: string, signal?: AbortSignal): Promise<GmailToken> {
   const { clientId, clientSecret } = await getGoogleClientConfig();
   const body = new URLSearchParams({
     code,
@@ -1137,6 +1138,7 @@ async function exchangeCodeForToken(code: string): Promise<GmailToken> {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body,
+    signal,
   });
 
   if (!response.ok) throw new Error(`Token exchange failed: ${response.status} ${await response.text()}`);
@@ -1159,7 +1161,23 @@ async function startOAuthFlow(): Promise<GmailToken> {
   authUrl.searchParams.set("state", state);
 
   return await new Promise<GmailToken>((resolve, reject) => {
-    const server = createServer(async (req, res) => {
+    const abortController = new AbortController();
+    let settled = false;
+    let callbackStarted = false;
+    let callbackResponse: ServerResponse | undefined;
+    let server: ReturnType<typeof createServer>;
+    let timeout: ReturnType<typeof setTimeout>;
+
+    const finish = (result: { token: GmailToken } | { error: unknown }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (server.listening) server.close();
+      if ("token" in result) resolve(result.token);
+      else reject(result.error);
+    };
+
+    server = createServer(async (req, res) => {
       try {
         const url = new URL(req.url ?? "/", REDIRECT_URI);
         if (url.pathname !== "/oauth2/callback") {
@@ -1168,27 +1186,47 @@ async function startOAuthFlow(): Promise<GmailToken> {
           return;
         }
 
+        if (callbackStarted) {
+          res.writeHead(409, { "content-type": "text/plain" });
+          res.end("OAuth callback is already being processed.\n");
+          return;
+        }
+        callbackStarted = true;
+        callbackResponse = res;
         if (url.searchParams.get("state") !== state) throw new Error("OAuth state mismatch.");
         const code = url.searchParams.get("code");
         if (!code) throw new Error(url.searchParams.get("error") ?? "Missing OAuth code.");
 
+        const token = await exchangeCodeForToken(code, abortController.signal);
+        await writeToken(token);
+        if (settled) return;
         res.writeHead(200, { "content-type": "text/plain" });
         res.end("pi email auth complete. You can close this tab.\n");
-        server.close();
-        resolve(await exchangeCodeForToken(code));
+        finish({ token });
       } catch (error) {
-        res.writeHead(500, { "content-type": "text/plain" });
-        res.end(String(error));
-        server.close();
-        reject(error);
+        if (settled) return;
+        if (!res.writableEnded) {
+          res.writeHead(500, { "content-type": "text/plain" });
+          res.end(`pi email auth failed: ${error instanceof Error ? error.message : String(error)}\n`);
+        }
+        finish({ error });
       }
     });
 
-    server.once("error", reject);
+    timeout = setTimeout(() => {
+      const error = new Error("OAuth flow timed out. Run /email auth to try again.");
+      abortController.abort();
+      if (callbackResponse && !callbackResponse.writableEnded) {
+        callbackResponse.writeHead(504, { "content-type": "text/plain" });
+        callbackResponse.end(`${error.message}\n`);
+      }
+      finish({ error });
+    }, OAUTH_FLOW_TIMEOUT_MS);
+
+    server.once("error", (error) => finish({ error }));
     server.listen(REDIRECT_PORT, "127.0.0.1", () => {
       execFileAsync("open", [authUrl.toString()]).catch((error) => {
-        server.close();
-        reject(error);
+        finish({ error });
       });
     });
   });
@@ -1253,8 +1291,7 @@ export default function (pi: ExtensionAPI) {
       if (subcommand === "auth") {
         try {
           ctx.ui.notify("Opening Google OAuth…", "info");
-          const token = await startOAuthFlow();
-          await writeToken(token);
+          await startOAuthFlow();
           ctx.ui.notify("gmail auth: connected. refresh token stored in macOS Keychain.", "info");
         } catch (error) {
           ctx.ui.notify(`gmail auth failed: ${error instanceof Error ? error.message : String(error)}`, "error");
