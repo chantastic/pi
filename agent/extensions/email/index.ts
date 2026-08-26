@@ -350,9 +350,13 @@ function emailOverlayOptions() {
   };
 }
 
-type ReplyComposeResult = { send: true; body: string } | { send: false };
+type ReplyComposeResult = { sent: true } | { sent: false };
 
-async function composeReply(ctx: any, item: InboxSweepItem): Promise<ReplyComposeResult> {
+async function composeReply(
+  ctx: any,
+  item: InboxSweepItem,
+  send: (body: string) => Promise<void>,
+): Promise<ReplyComposeResult> {
   return await ctx.ui.custom<ReplyComposeResult>((tui: any, theme: any, _keybindings: unknown, done: (value: ReplyComposeResult) => void) => {
     const editorTheme: EditorTheme = {
       borderColor: (text) => theme?.fg ? theme.fg("accent", text) : text,
@@ -368,15 +372,26 @@ async function composeReply(ctx: any, item: InboxSweepItem): Promise<ReplyCompos
     editor.focused = true;
     editor.disableSubmit = true;
     let message = "";
+    let sending = false;
 
-    const submit = () => {
+    const submit = async () => {
       const body = editor.getExpandedText().trim();
       if (!body) {
         message = "Write a reply before sending.";
         tui.requestRender();
         return;
       }
-      done({ send: true, body });
+      sending = true;
+      message = "Sending reply…";
+      tui.requestRender();
+      try {
+        await send(body);
+        done({ sent: true });
+      } catch (error) {
+        sending = false;
+        message = `Send failed: ${error instanceof Error ? error.message : String(error)}. Your draft is still here.`;
+        tui.requestRender();
+      }
     };
 
     return {
@@ -395,18 +410,19 @@ async function composeReply(ctx: any, item: InboxSweepItem): Promise<ReplyCompos
         ].filter((line) => line !== undefined) as string[];
         const header = headerLines.map((line) => `│ ${truncateToWidth(line, innerWidth).padEnd(innerWidth)} │`);
         const editorLines = editor.render(innerWidth).map((line) => `│ ${truncateToWidth(line, innerWidth).padEnd(innerWidth)} │`);
-        const footerText = "Ctrl-S/Ctrl-X Send  ·  Esc Cancel  ·  Enter New Line";
+        const footerText = sending ? "Sending…" : "Ctrl-S/Ctrl-X Send  ·  Esc Cancel  ·  Enter New Line";
         const footer = `│ ${truncateToWidth(footerText, innerWidth).padEnd(innerWidth)} │`;
         return [theme?.fg ? theme.fg("accent", top) : top, ...header, separator, ...editorLines, separator, theme?.fg ? theme.fg("muted", footer) : footer, bottom];
       },
       handleInput(data: string) {
+        if (sending) return;
         message = "";
         if (matchesKey(data, Key.escape)) {
-          done({ send: false });
+          done({ sent: false });
           return;
         }
         if (matchesKey(data, Key.ctrl("s")) || matchesKey(data, Key.ctrl("x"))) {
-          submit();
+          void submit();
           return;
         }
         if (matchesKey(data, Key.enter)) {
@@ -994,18 +1010,25 @@ async function runInboxSweep(ctx: any) {
           return;
         }
         if (choice === "replyNext") {
-          const reply = await composeReply(ctx, current);
-          if (!reply.send) {
+          const reply = await composeReply(ctx, current, async (body) => {
+            await sendReply(current, body);
+          });
+          if (!reply.sent) {
             message = "Reply cancelled.";
             tui.requestRender();
             return;
           }
-          processing = true;
-          message = `Sending reply to ${currentLabel(current)}…`;
-          tui.requestRender();
-          await sendReply(current, reply.body);
           ctx.ui.notify(`sent reply to ${currentLabel(current)}`, "info");
-          await showNext(1, true);
+          processing = true;
+          message = "Reply sent. Loading next inbox email…";
+          tui.requestRender();
+          try {
+            await showNext(1, true);
+          } catch (error) {
+            processing = false;
+            message = `Reply sent, but loading the next email failed: ${error instanceof Error ? error.message : String(error)}`;
+            tui.requestRender();
+          }
           return;
         }
         if (choice === "unsubscribeOpen") {
