@@ -31,14 +31,14 @@ http://127.0.0.1:53682/oauth2/callback
 /email              # start inbox triage
 /email config       # store Google OAuth client credentials in Keychain
 /email auth         # open Google OAuth, store Gmail token in Keychain
-/email status       # check whether config and Gmail auth are present
+/email status       # verify config, token scopes, and live Gmail access
 /email logout       # delete stored Gmail token
 /email clear-config # delete stored OAuth client credentials
 ```
 
 ## Tool
 
-- `email_status` — reports backend, storage, scope, and auth readiness
+- `email_status` — reports backend, storage, config source, granted/missing scopes, account, and live auth readiness
 
 ## Security posture
 
@@ -52,6 +52,8 @@ http://127.0.0.1:53682/oauth2/callback
   - config service: `pi-email-gmail-config`
   - account: `default`
 - No tokens or secrets are written into this repo.
+- Missing Keychain items are treated as normal setup state. Keychain command failures and corrupt stored JSON are surfaced as readiness errors instead of being reported as missing credentials.
+- `/email status` refreshes the access token when needed and calls Gmail's profile endpoint before reporting the account as connected.
 - `/email` fetches the full current message and displays it locally. It does not call Ollama or any remote model provider during triage.
 - Long-running actions show an `email:` footer status while loading, triaging, archiving, moving to spam, or moving to trash.
 - `/email` opens a persistent top-left full-screen overlay, prefetches the next email while you triage the current one, shows sender, a Gmail inbox search link for that sender, any detected unsubscribe link, full subject, and the message text in a scrollable pane, then accepts Gmail-like shortcuts:

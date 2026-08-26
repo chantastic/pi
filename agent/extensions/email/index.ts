@@ -18,6 +18,7 @@ const MAX_BULK_THREADS = 500;
 const BULK_PREVIEW_THREADS = 25;
 const GMAIL_REQUEST_CONCURRENCY = 5;
 const GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.modify"];
+const REQUIRED_GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.modify"];
 const GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1";
 
 type EmailAction =
@@ -81,54 +82,106 @@ type GoogleClientConfig = {
   clientSecret: string;
 };
 
+type GoogleClientConfigSource = "keychain" | "environment" | "keychain + environment" | "missing";
+
+type EmailStatus = {
+  ready: boolean;
+  configSource: GoogleClientConfigSource | "unavailable";
+  tokenStored: boolean;
+  grantedScopes: string[];
+  missingScopes: string[];
+  account?: string;
+  issue?: string;
+};
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isMissingKeychainItem(error: unknown) {
+  if (!error || typeof error !== "object") return false;
+  const failure = error as { code?: unknown; stderr?: unknown };
+  return failure.code === 44 || String(failure.stderr ?? "").includes("could not be found in the keychain");
+}
+
+function keychainFailure(action: string, service: string, error: unknown) {
+  const stderr = error && typeof error === "object" ? String((error as { stderr?: unknown }).stderr ?? "").trim() : "";
+  return new Error(`Could not ${action} macOS Keychain item ${service}: ${stderr || errorMessage(error)}`, { cause: error });
+}
+
 async function readKeychainJson<T>(service: string): Promise<T | null> {
+  let stdout: string;
   try {
-    const { stdout } = await execFileAsync("security", [
+    ({ stdout } = await execFileAsync("security", [
       "find-generic-password",
       "-s",
       service,
       "-a",
       KEYCHAIN_ACCOUNT,
       "-w",
-    ]);
+    ]));
+  } catch (error) {
+    if (isMissingKeychainItem(error)) return null;
+    throw keychainFailure("read", service, error);
+  }
+
+  try {
     return JSON.parse(stdout.trim()) as T;
-  } catch {
-    return null;
+  } catch (error) {
+    throw new Error(`macOS Keychain item ${service} contains invalid JSON. Remove and recreate it.`, { cause: error });
   }
 }
 
 async function writeKeychainJson(service: string, value: unknown) {
-  await execFileAsync("security", [
-    "add-generic-password",
-    "-U",
-    "-s",
-    service,
-    "-a",
-    KEYCHAIN_ACCOUNT,
-    "-w",
-    JSON.stringify(value),
-  ]);
+  try {
+    await execFileAsync("security", [
+      "add-generic-password",
+      "-U",
+      "-s",
+      service,
+      "-a",
+      KEYCHAIN_ACCOUNT,
+      "-w",
+      JSON.stringify(value),
+    ]);
+  } catch (error) {
+    throw keychainFailure("write", service, error);
+  }
 }
 
 async function deleteKeychainItem(service: string) {
   try {
     await execFileAsync("security", ["delete-generic-password", "-s", service, "-a", KEYCHAIN_ACCOUNT]);
-  } catch {
-    // Already absent.
+  } catch (error) {
+    if (isMissingKeychainItem(error)) return;
+    throw keychainFailure("delete", service, error);
   }
 }
 
-async function getGoogleClientConfig(): Promise<GoogleClientConfig> {
+async function resolveGoogleClientConfig(): Promise<{ config: GoogleClientConfig | null; source: GoogleClientConfigSource }> {
   const keychainConfig = await readKeychainJson<GoogleClientConfig>(CONFIG_KEYCHAIN_SERVICE);
-  const clientId = keychainConfig?.clientId ?? process.env.PI_EMAIL_GOOGLE_CLIENT_ID ?? process.env.GOOGLE_CLIENT_ID;
-  const clientSecret =
-    keychainConfig?.clientSecret ?? process.env.PI_EMAIL_GOOGLE_CLIENT_SECRET ?? process.env.GOOGLE_CLIENT_SECRET;
+  const environmentClientId = process.env.PI_EMAIL_GOOGLE_CLIENT_ID ?? process.env.GOOGLE_CLIENT_ID;
+  const environmentClientSecret = process.env.PI_EMAIL_GOOGLE_CLIENT_SECRET ?? process.env.GOOGLE_CLIENT_SECRET;
+  const clientId = keychainConfig?.clientId || environmentClientId;
+  const clientSecret = keychainConfig?.clientSecret || environmentClientSecret;
 
-  if (!clientId || !clientSecret) {
+  if (!clientId || !clientSecret) return { config: null, source: "missing" };
+
+  const usesKeychain = Boolean(keychainConfig?.clientId || keychainConfig?.clientSecret);
+  const usesEnvironment = Boolean(
+    (!keychainConfig?.clientId && environmentClientId) ||
+    (!keychainConfig?.clientSecret && environmentClientSecret),
+  );
+  const source = usesKeychain && usesEnvironment ? "keychain + environment" : usesKeychain ? "keychain" : "environment";
+  return { config: { clientId, clientSecret }, source };
+}
+
+async function getGoogleClientConfig(): Promise<GoogleClientConfig> {
+  const { config } = await resolveGoogleClientConfig();
+  if (!config) {
     throw new Error("Run /email config to store Google OAuth client credentials in macOS Keychain.");
   }
-
-  return { clientId, clientSecret };
+  return config;
 }
 
 async function readToken(): Promise<GmailToken | null> {
@@ -143,11 +196,11 @@ async function deleteToken() {
   await deleteKeychainItem(TOKEN_KEYCHAIN_SERVICE);
 }
 
-async function refreshAccessToken(token: GmailToken): Promise<GmailToken> {
+async function refreshAccessToken(token: GmailToken, clientConfig?: GoogleClientConfig): Promise<GmailToken> {
   if (token.access_token && token.expires_at && token.expires_at > Date.now() + 60_000) return token;
   if (!token.refresh_token) throw new Error("Missing Gmail refresh token. Run /email auth again.");
 
-  const { clientId, clientSecret } = await getGoogleClientConfig();
+  const { clientId, clientSecret } = clientConfig ?? await getGoogleClientConfig();
   const response = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -502,6 +555,66 @@ async function gmailGet<T>(path: string, accessToken: string): Promise<T> {
 
 async function gmailPost<T>(path: string, accessToken: string, body: unknown): Promise<T> {
   return gmailRequest<T>("POST", path, accessToken, body);
+}
+
+function scopesFromToken(token: GmailToken | null) {
+  return uniqueValues(token?.scope?.split(/\s+/).filter(Boolean) ?? []);
+}
+
+async function inspectEmailStatus(): Promise<EmailStatus> {
+  const { config, source: configSource } = await resolveGoogleClientConfig();
+  const token = await readToken();
+  const grantedScopes = scopesFromToken(token);
+  const grantedScopeSet = new Set(grantedScopes);
+  const missingScopes = REQUIRED_GMAIL_SCOPES.filter((scope) => !grantedScopeSet.has(scope));
+  const status = {
+    ready: false,
+    configSource,
+    tokenStored: Boolean(token?.refresh_token),
+    grantedScopes,
+    missingScopes,
+  } satisfies EmailStatus;
+
+  if (!config) return { ...status, issue: "OAuth client configuration is missing. Run /email config." };
+  if (!token?.refresh_token) return { ...status, issue: "A Gmail refresh token is missing. Run /email auth." };
+  if (missingScopes.length > 0) {
+    return { ...status, issue: "The stored token does not report every required Gmail scope. Run /email auth." };
+  }
+
+  try {
+    const refreshed = await refreshAccessToken(token, config);
+    if (!refreshed.access_token) throw new Error("Google did not return an access token.");
+    const profile = await gmailGet<{ emailAddress?: string }>("/users/me/profile", refreshed.access_token);
+    return {
+      ...status,
+      ready: true,
+      account: verifiedEmailAddress(profile.emailAddress ?? ""),
+    };
+  } catch (error) {
+    return { ...status, issue: `Live Gmail check failed: ${errorMessage(error)}` };
+  }
+}
+
+async function emailStatus(): Promise<EmailStatus> {
+  try {
+    return await inspectEmailStatus();
+  } catch (error) {
+    return {
+      ready: false,
+      configSource: "unavailable",
+      tokenStored: false,
+      grantedScopes: [],
+      missingScopes: [...REQUIRED_GMAIL_SCOPES],
+      issue: errorMessage(error),
+    };
+  }
+}
+
+function formatEmailStatus(status: EmailStatus) {
+  if (status.ready) {
+    return `gmail auth: connected as ${status.account}; config: ${status.configSource}; scopes: verified`;
+  }
+  return `gmail auth: not ready; config: ${status.configSource}; ${status.issue ?? "readiness check failed"}`;
 }
 
 type SenderInboxThread = {
@@ -1344,12 +1457,8 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (subcommand === "status") {
-        const token = await readToken();
-        const config = await readKeychainJson<GoogleClientConfig>(CONFIG_KEYCHAIN_SERVICE);
-        ctx.ui.notify(
-          `gmail auth: ${token?.refresh_token ? "connected" : "not connected"}; config: ${config ? "stored" : "missing"}`,
-          "info",
-        );
+        const status = await emailStatus();
+        ctx.ui.notify(formatEmailStatus(status), status.ready ? "info" : "warning");
         return;
       }
 
@@ -1404,15 +1513,21 @@ export default function (pi: ExtensionAPI) {
     description: "Report whether the Gmail email extension is authenticated",
     parameters: Type.Object({}),
     async execute() {
-      const token = await readToken();
-      const connected = Boolean(token?.refresh_token);
+      const status = await emailStatus();
       return {
-        content: [{ type: "text", text: connected ? "gmail auth: connected" : "gmail auth: not connected" }],
+        content: [{ type: "text", text: formatEmailStatus(status) }],
         details: {
-          ready: connected,
+          ready: status.ready,
           backend: "gmail",
           tokenStorage: "macOS Keychain",
-          scopes: GMAIL_SCOPES,
+          configSource: status.configSource,
+          tokenStored: status.tokenStored,
+          requestedScopes: GMAIL_SCOPES,
+          requiredScopes: REQUIRED_GMAIL_SCOPES,
+          grantedScopes: status.grantedScopes,
+          missingScopes: status.missingScopes,
+          account: status.account,
+          issue: status.issue,
         },
       };
     },
