@@ -554,6 +554,14 @@ function sanitizeHeaderValue(value: string) {
   return value.replace(/[\r\n]+/g, " ").trim();
 }
 
+function verifiedEmailAddress(value: string) {
+  const emailAddress = sanitizeHeaderValue(value);
+  if (emailAddress !== value.trim() || !/^[^\s@<>]+@[^\s@<>]+$/.test(emailAddress)) {
+    throw new Error("Gmail profile returned an invalid sender address.");
+  }
+  return emailAddress;
+}
+
 function encodeMimeHeader(value: string) {
   const sanitized = sanitizeHeaderValue(value);
   return /^[\x20-\x7E]*$/.test(sanitized) ? sanitized : `=?UTF-8?B?${Buffer.from(sanitized, "utf8").toString("base64")}?=`;
@@ -569,11 +577,12 @@ function base64UrlEncode(value: string) {
   return Buffer.from(value, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
-function buildReplyRawMessage(item: InboxSweepItem, body: string) {
+function buildReplyRawMessage(item: InboxSweepItem, body: string, fromAddress: string) {
   const messageId = sanitizeHeaderValue(item.messageIdHeader);
   const priorReferences = sanitizeHeaderValue(item.referencesHeader);
   const references = [priorReferences, messageId].filter(Boolean).join(" ");
   const headers = [
+    `From: ${verifiedEmailAddress(fromAddress)}`,
     `To: ${sanitizeHeaderValue(item.replyTo || item.from || item.senderEmail)}`,
     `Subject: ${encodeMimeHeader(replySubject(item.subject))}`,
     messageId ? `In-Reply-To: ${messageId}` : undefined,
@@ -670,8 +679,10 @@ async function collectThreadSummaries(threadIds: string[], accessToken: string):
 
 async function sendReply(item: InboxSweepItem, body: string) {
   const accessToken = await getAccessToken();
+  const profile = await gmailGet<{ emailAddress?: string }>("/users/me/profile", accessToken);
+  const fromAddress = verifiedEmailAddress(profile.emailAddress ?? "");
   return await gmailPost<{ id: string; threadId: string }>(`/users/me/messages/send`, accessToken, {
-    raw: buildReplyRawMessage(item, body),
+    raw: buildReplyRawMessage(item, body, fromAddress),
     threadId: item.threadId,
   });
 }
