@@ -1,8 +1,12 @@
 {
   "name": "pi-extension-email",
   "private": true,
+  "type": "module",
   "version": "0.1.0",
   "description": "Gmail triage extension for Pi.",
+  "scripts": {
+    "test": "node --test ./mime.test.ts"
+  },
   "pi": {
     "extensions": ["./index.ts"]
   }

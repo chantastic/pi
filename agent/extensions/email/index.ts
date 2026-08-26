@@ -5,6 +5,8 @@ import { execFile } from "node:child_process";
 import { createServer, type ServerResponse } from "node:http";
 import { promisify } from "node:util";
 
+import { collectAllPayloadText, collectPreferredPayloadText, type GmailPayload } from "./mime.ts";
+
 const execFileAsync = promisify(execFile);
 const TOKEN_KEYCHAIN_SERVICE = "pi-email-gmail";
 const CONFIG_KEYCHAIN_SERVICE = "pi-email-gmail-config";
@@ -502,13 +504,6 @@ async function gmailPost<T>(path: string, accessToken: string, body: unknown): P
   return gmailRequest<T>("POST", path, accessToken, body);
 }
 
-type GmailPayload = {
-  mimeType?: string;
-  body?: { data?: string };
-  headers?: Array<{ name?: string; value?: string }>;
-  parts?: GmailPayload[];
-};
-
 type SenderInboxThread = {
   threadId: string;
   subject: string;
@@ -525,43 +520,6 @@ function senderEmail(from: string) {
   return (
     from.match(/<([^>]+)>/)?.[1] ?? from.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] ?? from.trim()
   ).toLowerCase();
-}
-
-function decodeBase64Url(data: string) {
-  return Buffer.from(data.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
-}
-
-function collectPayloadTexts(payload: GmailPayload | undefined): { plain: string[]; html: string[]; other: string[] } {
-  if (!payload) return { plain: [], html: [], other: [] };
-
-  const nested = (payload.parts ?? []).map(collectPayloadTexts).reduce(
-    (acc, part) => ({
-      plain: [...acc.plain, ...part.plain],
-      html: [...acc.html, ...part.html],
-      other: [...acc.other, ...part.other],
-    }),
-    { plain: [] as string[], html: [] as string[], other: [] as string[] },
-  );
-
-  if (!payload.body?.data) return nested;
-
-  const text = decodeBase64Url(payload.body.data);
-  const mimeType = payload.mimeType?.toLowerCase() ?? "";
-  if (mimeType === "text/plain") nested.plain.push(text);
-  else if (mimeType === "text/html") nested.html.push(text);
-  else nested.other.push(text);
-  return nested;
-}
-
-function collectPreferredPayloadText(payload: GmailPayload | undefined): string {
-  const texts = collectPayloadTexts(payload);
-  const preferred = texts.plain.length > 0 ? texts.plain : texts.html.length > 0 ? texts.html : texts.other;
-  return preferred.filter(Boolean).join("\n");
-}
-
-function collectAllPayloadText(payload: GmailPayload | undefined): string {
-  const texts = collectPayloadTexts(payload);
-  return [...texts.plain, ...texts.html, ...texts.other].filter(Boolean).join("\n");
 }
 
 function decodeHtmlCodePoint(codePoint: number, fallback: string) {
