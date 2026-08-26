@@ -7,7 +7,6 @@ import {
   archiveThreadIds,
   broadSimilarInboxQuery,
   collectInboxSweepItemAtOffset,
-  collectInboxThreadIdsFromSender,
   collectNewestInboxSweepItem,
   collectSimilarInboxSelection,
   type InboxSweepItem,
@@ -142,10 +141,16 @@ function gmailSearchUrl(query: string) {
   return `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
 }
 
-async function confirmBulkAction(ctx: ExtensionCommandContext, actionLabel: string, item: InboxSweepItem) {
+async function confirmBulkAction(
+  ctx: ExtensionCommandContext,
+  actionLabel: string,
+  item: InboxSweepItem,
+  queryOptions = uniqueValues([similarInboxQuery(item), broadSimilarInboxQuery(item)]),
+  cancelLabel = "Cancel and next",
+) {
   type BulkSelection = Awaited<ReturnType<typeof collectSimilarInboxSelection>>;
   type BulkResult = { confirmed: true; selection: BulkSelection } | { confirmed: false };
-  const queries = uniqueValues([similarInboxQuery(item), broadSimilarInboxQuery(item)]);
+  const queries = uniqueValues(queryOptions);
 
   return await ctx.ui.custom<BulkResult>((tui: { requestRender: () => void }, theme: any, _keybindings: unknown, done: (value: BulkResult) => void) => {
     let queryIndex = 0;
@@ -185,14 +190,16 @@ async function confirmBulkAction(ctx: ExtensionCommandContext, actionLabel: stri
           [
             `Query: ${query}`,
             `Link: ${gmailSearchUrl(query)}`,
-            `Mode: ${queryIndex === 0 ? "filtered by subject" : "expanded to sender"}`,
+            `Mode: ${queries.length === 1 || queryIndex > 0 ? "expanded to sender" : "filtered by subject"}`,
             "",
             selection
               ? `Threads included: ${selection.threadIds.length}. Previewing ${selection.summaries.length}:`
               : loading,
             ...(selection?.summaries.map((summary, index) => `${index + 1}. ${summary.subject || "(no subject)"}`) ?? []),
           ],
-          "+ Expand  ·  - Filter  ·  Return Confirm  ·  Esc Cancel and next",
+          [queries.length > 1 ? "+ Expand  ·  - Filter" : undefined, "Return Confirm", `Esc ${cancelLabel}`]
+            .filter(Boolean)
+            .join("  ·  "),
           width,
           theme,
         );
@@ -349,6 +356,10 @@ export async function runInboxSweep(ctx: ExtensionCommandContext) {
     let helpScrollOffset = 0;
 
     const currentLabel = (current: InboxSweepItem) => current.senderEmail || current.from || "email";
+    const setMessage = (next: string) => {
+      message = next;
+      ctx.ui.setStatus("email", `email: ${next.toLowerCase()}`);
+    };
 
     const excludedForNext = () => {
       const excluded = new Set(removedThreadIds);
@@ -365,7 +376,7 @@ export async function runInboxSweep(ctx: ExtensionCommandContext) {
         if (items.some((cached) => cached.threadId === prefetched.threadId)) return null;
         return prefetched;
       }).catch((error) => {
-        message = `Prefetch failed: ${error instanceof Error ? error.message : String(error)}`;
+        setMessage(`Prefetch failed: ${error instanceof Error ? error.message : String(error)}`);
         tui.requestRender();
         return null;
       });
@@ -374,8 +385,7 @@ export async function runInboxSweep(ctx: ExtensionCommandContext) {
     const setCurrentItem = (next: InboxSweepItem) => {
       item = next;
       messageScrollOffset = 0;
-      message = `Triaging ${currentLabel(next)}`;
-      ctx.ui.setStatus("email", `email: ${message.toLowerCase()}`);
+      setMessage(`Triaging ${currentLabel(next)}`);
     };
 
     const loadNextInboxItem = async (usePrefetch: boolean) => {
@@ -401,7 +411,7 @@ export async function runInboxSweep(ctx: ExtensionCommandContext) {
 
     const showNext = async (count = 1, usePrefetch = true) => {
       processing = true;
-      message = count > 1 ? `Jumping ahead ${count} inbox emails…` : "Loading next inbox email…";
+      setMessage(count > 1 ? `Jumping ahead ${count} inbox emails…` : "Loading next inbox email…");
       tui.requestRender();
 
       const futureCount = Math.max(0, items.length - currentIndex - 1);
@@ -429,7 +439,7 @@ export async function runInboxSweep(ctx: ExtensionCommandContext) {
           done();
           return;
         }
-        message = "No more inbox emails loaded.";
+        setMessage("No more inbox emails loaded.");
         tui.requestRender();
         return;
       }
@@ -445,7 +455,7 @@ export async function runInboxSweep(ctx: ExtensionCommandContext) {
     const showPrevious = (count = 1) => {
       if (!item) return;
       if (currentIndex <= 0) {
-        message = "At newest loaded email.";
+        setMessage("At newest loaded email.");
         tui.requestRender();
         return;
       }
@@ -500,7 +510,7 @@ export async function runInboxSweep(ctx: ExtensionCommandContext) {
         }
         if (choice === "archive") {
           processing = true;
-          message = `Archiving ${currentLabel(current)}…`;
+          setMessage(`Archiving ${currentLabel(current)}…`);
           tui.requestRender();
           await archiveThreadIds([current.threadId]);
           removeThreadIdsFromCache([current.threadId]);
@@ -509,7 +519,7 @@ export async function runInboxSweep(ctx: ExtensionCommandContext) {
         }
         if (choice === "trash") {
           processing = true;
-          message = `Moving ${currentLabel(current)} to trash…`;
+          setMessage(`Moving ${currentLabel(current)} to trash…`);
           tui.requestRender();
           await trashThreadIds([current.threadId]);
           removeThreadIdsFromCache([current.threadId]);
@@ -518,7 +528,7 @@ export async function runInboxSweep(ctx: ExtensionCommandContext) {
         }
         if (choice === "spam") {
           processing = true;
-          message = `Moving ${currentLabel(current)} to spam…`;
+          setMessage(`Moving ${currentLabel(current)} to spam…`);
           tui.requestRender();
           await spamThreadIds([current.threadId]);
           removeThreadIdsFromCache([current.threadId]);
@@ -530,19 +540,19 @@ export async function runInboxSweep(ctx: ExtensionCommandContext) {
             await sendReply(current, body);
           });
           if (!reply.sent) {
-            message = "Reply cancelled.";
+            setMessage("Reply cancelled.");
             tui.requestRender();
             return;
           }
           ctx.ui.notify(`sent reply to ${currentLabel(current)}`, "info");
           processing = true;
-          message = "Reply sent. Loading next inbox email…";
+          setMessage("Reply sent. Loading next inbox email…");
           tui.requestRender();
           try {
             await showNext(1, true);
           } catch (error) {
             processing = false;
-            message = `Reply sent, but loading the next email failed: ${error instanceof Error ? error.message : String(error)}`;
+            setMessage(`Reply sent, but loading the next email failed: ${error instanceof Error ? error.message : String(error)}`);
             tui.requestRender();
           }
           return;
@@ -550,26 +560,41 @@ export async function runInboxSweep(ctx: ExtensionCommandContext) {
         if (choice === "unsubscribeOpen") {
           if (current.chosenUnsubscribeUrl) {
             await execFileAsync("open", [current.chosenUnsubscribeUrl]);
-            message = `Opened unsubscribe link for ${currentLabel(current)}`;
+            setMessage(`Opened unsubscribe link for ${currentLabel(current)}`);
           } else {
-            message = "No unsubscribe link found for this message.";
+            setMessage("No unsubscribe link found for this message.");
           }
           tui.requestRender();
           return;
         }
         if (choice === "unsubscribeArchiveSender") {
           if (!current.chosenUnsubscribeUrl) {
-            message = "No unsubscribe link found for this message.";
+            setMessage("No unsubscribe link found for this message.");
             tui.requestRender();
             return;
           }
           processing = true;
-          message = `Opening unsubscribe and archiving ${currentLabel(current)}…`;
+          setMessage(`Finding sender threads for ${currentLabel(current)}…`);
+          tui.requestRender();
+          const result = await confirmBulkAction(
+            ctx,
+            "open unsubscribe and archive sender",
+            current,
+            [broadSimilarInboxQuery(current)],
+            "Cancel",
+          );
+          if (!result.confirmed) {
+            processing = false;
+            setMessage("Unsubscribe and archive cancelled.");
+            tui.requestRender();
+            return;
+          }
+          const { query, threadIds } = result.selection;
+          setMessage(`Opening unsubscribe and archiving ${currentLabel(current)}…`);
           tui.requestRender();
           await execFileAsync("open", [current.chosenUnsubscribeUrl]);
-          const { query, threadIds } = await collectInboxThreadIdsFromSender(current);
           await archiveThreadIds(threadIds, (completed, total) => {
-            message = `Archiving sender threads ${completed}/${total}…`;
+            setMessage(`Archiving sender threads ${completed}/${total}…`);
             tui.requestRender();
           });
           removeThreadIdsFromCache(threadIds);
@@ -580,7 +605,7 @@ export async function runInboxSweep(ctx: ExtensionCommandContext) {
         }
         if (choice === "archiveSimilar" || choice === "trashSimilar") {
           processing = true;
-          message = `Finding messages like ${currentLabel(current)}…`;
+          setMessage(`Finding messages like ${currentLabel(current)}…`);
           tui.requestRender();
           const isTrash = choice === "trashSimilar";
           const result = await confirmBulkAction(ctx, isTrash ? "trash messages like this" : "archive messages like this", current);
@@ -589,10 +614,10 @@ export async function runInboxSweep(ctx: ExtensionCommandContext) {
             return;
           }
           const { query, threadIds } = result.selection;
-          message = `${isTrash ? "Moving" : "Archiving"} ${threadIds.length} similar thread(s)…`;
+          setMessage(`${isTrash ? "Moving" : "Archiving"} ${threadIds.length} similar thread(s)…`);
           tui.requestRender();
           const reportProgress = (completed: number, total: number) => {
-            message = `${isTrash ? "Moving to trash" : "Archiving"} similar threads ${completed}/${total}…`;
+            setMessage(`${isTrash ? "Moving to trash" : "Archiving"} similar threads ${completed}/${total}…`);
             tui.requestRender();
           };
           if (isTrash) await trashThreadIds(threadIds, reportProgress);
@@ -603,7 +628,7 @@ export async function runInboxSweep(ctx: ExtensionCommandContext) {
           await showNext(1, false);
         }
       } catch (error) {
-        message = `Action failed: ${error instanceof Error ? error.message : String(error)}`;
+        setMessage(`Action failed: ${error instanceof Error ? error.message : String(error)}`);
         processing = false;
         tui.requestRender();
       }
@@ -624,7 +649,9 @@ export async function runInboxSweep(ctx: ExtensionCommandContext) {
           );
         }
         const body = item ? formatInboxSweepPrompt(item).split("\n") : [message];
-        if (processing) body.push("", theme?.fg ? theme.fg("muted", message) : message);
+        if (item && (processing || !message.startsWith("Triaging "))) {
+          body.push("", theme?.fg ? theme.fg("muted", message) : message);
+        }
         return boxedLines(
           "Email",
           body,

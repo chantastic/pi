@@ -62,7 +62,7 @@ http://127.0.0.1:53682/oauth2/callback
   - `!` — Spam
   - `r` — Compose and send an inline reply, then move to the next message
   - `u` — Open detected unsubscribe link
-  - `U` — Open detected unsubscribe link and archive all inbox threads from that sender
+  - `U` — Preview, confirm, then open unsubscribe and archive that sender
   - `j` — Next message
   - `k` — Previous loaded message
   - `J` — Jump directly to the 10th next message
@@ -75,7 +75,7 @@ http://127.0.0.1:53682/oauth2/callback
 - Archive, spam, and trash actions remove `UNREAD` so affected threads are marked read while leaving the inbox. Spam applies Gmail's `SPAM` label and removes `INBOX` from the matching threads. Trash moves matching threads to Gmail Trash. Next/previous navigation leaves threads untouched. Escape stops triage.
 - Reply opens an inline editor, sends through Gmail API after `Ctrl-S` or `Ctrl-X`, and advances the sweep only after the send succeeds. `Esc` cancels and keeps the current message selected.
 - Reply MIME uses the authenticated address returned by Gmail's profile endpoint as its explicit `From` identity. This uses the existing Gmail grant and does not require an additional OAuth scope.
-- Unsubscribe links are extracted from `List-Unsubscribe` and inline plain-text/HTML message bodies; attachments and binary MIME parts are ignored. `u` opens the first detected unsubscribe link. `U` opens it and archives all inbox threads from that sender. It does not ask for confirmation or fall back to `mailto:` yet.
+- Unsubscribe links are extracted from `List-Unsubscribe` and inline plain-text/HTML message bodies; attachments and binary MIME parts are ignored. `u` opens the first detected unsubscribe link. `U` previews all matching inbox threads, requires confirmation, then opens the link and archives the sender. Neither action falls back to `mailto:`.
 - The extension never fetches unsubscribe URLs server-side or clicks through pages. Sending mail only happens from the inline reply editor after an explicit send command. Archive/spam/trash actions run only after an explicit triage choice.
 - Sender-wide archive targets always include the current thread plus all inbox threads matching the sender email. This avoids leaving the selected sender visible when Gmail's thread UI and message-level searches disagree.
 

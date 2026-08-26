@@ -1,6 +1,5 @@
-import { getAccessToken } from "./auth.ts";
+import { errorMessage, getAccessToken } from "./auth.ts";
 import {
-  broadSimilarInboxQuery,
   buildReplyRawMessage,
   createInboxSweepItem,
   type GmailMessageContent,
@@ -133,10 +132,17 @@ async function modifyThreadIds(
 ) {
   const uniqueThreadIds = boundedBulkThreadIds(threadIds);
   let completed = 0;
-  await mapWithConcurrency(uniqueThreadIds, GMAIL_REQUEST_CONCURRENCY, async (threadId) => {
-    await gmailPost(`/users/me/threads/${encodeURIComponent(threadId)}/modify`, accessToken, body);
-    onProgress?.(++completed, uniqueThreadIds.length);
-  });
+  try {
+    await mapWithConcurrency(uniqueThreadIds, GMAIL_REQUEST_CONCURRENCY, async (threadId) => {
+      await gmailPost(`/users/me/threads/${encodeURIComponent(threadId)}/modify`, accessToken, body);
+      onProgress?.(++completed, uniqueThreadIds.length);
+    });
+  } catch (error) {
+    throw new Error(
+      `Gmail mutation completed ${completed}/${uniqueThreadIds.length} threads before failing: ${errorMessage(error)}`,
+      { cause: error },
+    );
+  }
 }
 
 export async function archiveThreadIds(threadIds: string[], onProgress?: GmailRequestProgress) {
@@ -161,13 +167,20 @@ export async function trashThreadIds(threadIds: string[], onProgress?: GmailRequ
   if (uniqueThreadIds.length === 0) return;
   const accessToken = await getAccessToken();
   let completed = 0;
-  await mapWithConcurrency(uniqueThreadIds, GMAIL_REQUEST_CONCURRENCY, async (threadId) => {
-    await gmailPost(`/users/me/threads/${encodeURIComponent(threadId)}/modify`, accessToken, {
-      removeLabelIds: ["UNREAD"],
+  try {
+    await mapWithConcurrency(uniqueThreadIds, GMAIL_REQUEST_CONCURRENCY, async (threadId) => {
+      await gmailPost(`/users/me/threads/${encodeURIComponent(threadId)}/modify`, accessToken, {
+        removeLabelIds: ["UNREAD"],
+      });
+      await gmailPost(`/users/me/threads/${encodeURIComponent(threadId)}/trash`, accessToken, {});
+      onProgress?.(++completed, uniqueThreadIds.length);
     });
-    await gmailPost(`/users/me/threads/${encodeURIComponent(threadId)}/trash`, accessToken, {});
-    onProgress?.(++completed, uniqueThreadIds.length);
-  });
+  } catch (error) {
+    throw new Error(
+      `Gmail trash completed ${completed}/${uniqueThreadIds.length} threads before failing: ${errorMessage(error)}`,
+      { cause: error },
+    );
+  }
 }
 
 async function collectThreadSummaries(
@@ -257,12 +270,6 @@ export async function collectInboxSweepItemAtOffset(
 
 export async function collectNewestInboxSweepItem(excludedThreadIds = new Set<string>()) {
   return (await collectInboxSweepItemAtOffset(0, excludedThreadIds)).item;
-}
-
-export async function collectInboxThreadIdsFromSender(item: InboxSweepItem) {
-  const query = broadSimilarInboxQuery(item);
-  const threadIds = await listThreadIds(query, await getAccessToken());
-  return { query, threadIds: boundedBulkThreadIds([item.threadId, ...threadIds]) };
 }
 
 export async function collectSimilarInboxSelection(
