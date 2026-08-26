@@ -231,10 +231,6 @@ function formatGmailApiError(status: number, body: string) {
   return `Gmail API failed: ${status} ${body}${reauthHint}`;
 }
 
-function actionLegend(actions: EmailAction[]) {
-  return actions.map((action) => `${EMAIL_ACTIONS[action].keys.join("/")} ${EMAIL_ACTIONS[action].label}`).join("  ·  ");
-}
-
 function borderLine(width: number, left: string, fill: string, right: string) {
   return left + fill.repeat(Math.max(0, width - left.length - right.length)) + right;
 }
@@ -274,6 +270,18 @@ function actionForKey(data: string, actions: EmailAction[]): EmailAction | undef
   if (data === "u" && actions.includes("unsubscribeOpen")) return "unsubscribeOpen";
   if (data === "U" && actions.includes("unsubscribeArchiveSender")) return "unsubscribeArchiveSender";
   return undefined;
+}
+
+function inboxHelpLines() {
+  return [
+    "Message actions",
+    ...INBOX_SWEEP_ACTIONS.map((action) => `${EMAIL_ACTIONS[action].keys.join(" / ")}  ${EMAIL_ACTIONS[action].label}`),
+    "",
+    "Reading",
+    "↑ / ↓  Scroll one line",
+    "PageUp / PageDown  Scroll ten lines",
+    "Ctrl-U / Ctrl-D  Scroll ten lines",
+  ];
 }
 
 function wrapDisplayLines(lines: string[], width: number) {
@@ -919,7 +927,9 @@ async function runInboxSweep(ctx: any) {
     let considered = 0;
     let processing = false;
     let message = "Loading newest inbox email…";
-    let scrollOffset = 0;
+    let helpVisible = false;
+    let messageScrollOffset = 0;
+    let helpScrollOffset = 0;
 
     const currentLabel = (current: InboxSweepItem) => current.senderEmail || current.from || "email";
 
@@ -946,7 +956,7 @@ async function runInboxSweep(ctx: any) {
 
     const setCurrentItem = (next: InboxSweepItem) => {
       item = next;
-      scrollOffset = 0;
+      messageScrollOffset = 0;
       message = `Triaging ${currentLabel(next)}`;
       ctx.ui.setStatus("email", `email: ${message.toLowerCase()}`);
     };
@@ -1038,6 +1048,12 @@ async function runInboxSweep(ctx: any) {
       }
       if (currentIndex >= items.length) currentIndex = items.length - 1;
       item = currentIndex >= 0 ? items[currentIndex]! : null;
+    };
+
+    const adjustScroll = (delta: number) => {
+      if (helpVisible) helpScrollOffset = Math.max(0, helpScrollOffset + delta);
+      else messageScrollOffset = Math.max(0, messageScrollOffset + delta);
+      tui.requestRender();
     };
 
     const act = async (choice: EmailAction) => {
@@ -1180,28 +1196,54 @@ async function runInboxSweep(ctx: any) {
 
     return {
       render(width: number) {
+        if (helpVisible) {
+          return boxedLines(
+            "Email Help",
+            inboxHelpLines(),
+            "? / q / Esc Close  ·  ↑/↓ Scroll  ·  Ctrl-U/Ctrl-D Scroll",
+            width,
+            theme,
+            helpScrollOffset,
+          );
+        }
         const body = item ? formatInboxSweepPrompt(item).split("\n") : [message];
         if (processing) body.push("", theme?.fg ? theme.fg("muted", message) : message);
-        return boxedLines("Email", body, `${actionLegend(INBOX_SWEEP_ACTIONS)}  ·  ↑/↓ Scroll  ·  Ctrl-U/Ctrl-D Scroll  ·  ? Help`, width, theme, scrollOffset);
+        return boxedLines(
+          "Email",
+          body,
+          "Return/e Archive  ·  # Trash  ·  ! Spam  ·  r Reply  ·  j/k Move  ·  ? Help  ·  q Quit",
+          width,
+          theme,
+          messageScrollOffset,
+        );
       },
       handleInput(data: string) {
         if (matchesKey(data, Key.up)) {
-          scrollOffset = Math.max(0, scrollOffset - 1);
-          tui.requestRender();
+          adjustScroll(-1);
           return;
         }
         if (matchesKey(data, Key.down)) {
-          scrollOffset += 1;
-          tui.requestRender();
+          adjustScroll(1);
           return;
         }
         if (matchesKey(data, "pageup") || matchesKey(data, Key.ctrl("u"))) {
-          scrollOffset = Math.max(0, scrollOffset - 10);
-          tui.requestRender();
+          adjustScroll(-10);
           return;
         }
         if (matchesKey(data, "pagedown") || matchesKey(data, Key.ctrl("d"))) {
-          scrollOffset += 10;
+          adjustScroll(10);
+          return;
+        }
+        if (helpVisible) {
+          if (data === "?" || data === "q" || matchesKey(data, Key.escape)) {
+            helpVisible = false;
+            tui.requestRender();
+          }
+          return;
+        }
+        if (data === "?") {
+          helpVisible = true;
+          helpScrollOffset = 0;
           tui.requestRender();
           return;
         }
