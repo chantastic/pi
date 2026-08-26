@@ -5,9 +5,20 @@
   "version": "0.1.0",
   "description": "Gmail triage extension for Pi.",
   "scripts": {
-    "test": "node --test ./mime.test.ts"
+    "check": "npm run typecheck && npm test",
+    "test": "node --test ./*.test.ts",
+    "typecheck": "tsc --noEmit"
   },
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.1",
+    "@earendil-works/pi-tui": "0.84.1",
+    "@types/node": "24.12.4",
+    "typebox": "1.3.7",
+    "typescript": "5.9.3"
   }
 }

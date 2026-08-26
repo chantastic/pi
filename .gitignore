@@ -15,3 +15,4 @@ agent/extensions/herdr-agent-state.ts
 agent/bin/
 agent/git/
 agent/npm/
+agent/extensions/email/node_modules/

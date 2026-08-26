@@ -43,9 +43,7 @@ http://127.0.0.1:53682/oauth2/callback
 ## Security posture
 
 - Uses Gmail API, not IMAP/app passwords.
-- Requests Gmail scopes:
-  - `https://www.googleapis.com/auth/gmail.readonly`
-  - `https://www.googleapis.com/auth/gmail.modify`
+- Requests one Gmail scope: `https://www.googleapis.com/auth/gmail.modify`. It covers the extension's read, triage, compose, and send operations.
 - Adding a new scope requires re-authentication with `/email auth` so Google issues a token with the updated grant.
 - Stores OAuth client credentials and token JSON in macOS Keychain as:
   - token service: `pi-email-gmail`
@@ -98,3 +96,19 @@ pi -e ./index.ts
 ```
 
 Or package it as a pi package using the `pi.extensions` field already present in `package.json`.
+
+## Development
+
+```bash
+npm install
+npm run check
+```
+
+`npm run check` runs strict TypeScript checking and the Node test suite. Runtime ownership is split by concern:
+
+- `index.ts` — Pi command and tool registration
+- `auth.ts` — Keychain storage, OAuth, token refresh, and readiness
+- `gmail.ts` — Gmail transport, bounded mailbox reads, and mutations
+- `message.ts` — message interpretation, Gmail queries, and reply MIME construction
+- `mime.ts` — attachment-aware MIME body extraction
+- `sweep.ts` — TUI rendering, navigation state, and explicit user actions
