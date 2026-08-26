@@ -12,6 +12,9 @@ const KEYCHAIN_ACCOUNT = "default";
 const REDIRECT_PORT = 53682;
 const REDIRECT_URI = `http://127.0.0.1:${REDIRECT_PORT}/oauth2/callback`;
 const OAUTH_FLOW_TIMEOUT_MS = 5 * 60 * 1000;
+const MAX_BULK_THREADS = 500;
+const BULK_PREVIEW_THREADS = 25;
+const GMAIL_REQUEST_CONCURRENCY = 5;
 const GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.modify"];
 const GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1";
 
@@ -199,6 +202,28 @@ function uniqueValues<T>(values: T[]): T[] {
   return Array.from(new Set(values));
 }
 
+async function mapWithConcurrency<T, R>(
+  values: T[],
+  concurrency: number,
+  map: (value: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(values.length);
+  let nextIndex = 0;
+
+  const worker = async () => {
+    while (nextIndex < values.length) {
+      const index = nextIndex++;
+      results[index] = await map(values[index]!, index);
+    }
+  };
+
+  const workers = Array.from({ length: Math.min(concurrency, values.length) }, () => worker());
+  const outcomes = await Promise.allSettled(workers);
+  const failure = outcomes.find((outcome): outcome is PromiseRejectedResult => outcome.status === "rejected");
+  if (failure) throw failure.reason;
+  return results;
+}
+
 function formatGmailApiError(status: number, body: string) {
   const reauthHint = body.includes("insufficient") || body.includes("ACCESS_TOKEN_SCOPE_INSUFFICIENT")
     ? " Run /email auth to grant the current Gmail scopes."
@@ -287,7 +312,11 @@ async function confirmBulkAction(ctx: any, actionLabel: string, item: InboxSweep
       selection = null;
       tui.requestRender();
       try {
-        const nextSelection = await collectSimilarInboxSelection(item, query);
+        const nextSelection = await collectSimilarInboxSelection(item, query, (progress) => {
+          if (version !== loadVersion) return;
+          loading = progress;
+          tui.requestRender();
+        });
         if (version !== loadVersion) return;
         selection = nextSelection;
         loading = "";
@@ -310,7 +339,9 @@ async function confirmBulkAction(ctx: any, actionLabel: string, item: InboxSweep
             `Link: ${gmailSearchUrl(query)}`,
             `Mode: ${queryIndex === 0 ? "filtered by subject" : "expanded to sender"}`,
             "",
-            selection ? `Threads included (${selection.threadIds.length}):` : loading,
+            selection
+              ? `Threads included: ${selection.threadIds.length}. Previewing ${selection.summaries.length}:`
+              : loading,
             ...(selection?.summaries.map((summary, index) => `${index + 1}. ${summary.subject || "(no subject)"}`) ?? []),
           ],
           "+ Expand  ·  - Filter  ·  Return Confirm  ·  Esc Cancel and next",
@@ -608,7 +639,8 @@ async function listThreadIds(query: string, accessToken: string): Promise<string
   let pageToken: string | undefined;
 
   do {
-    const params = new URLSearchParams({ q: query, maxResults: "500" });
+    const remaining = MAX_BULK_THREADS + 1 - ids.length;
+    const params = new URLSearchParams({ q: query, maxResults: String(Math.min(500, remaining)) });
     if (pageToken) params.set("pageToken", pageToken);
     const page = await gmailGet<{ threads?: Array<{ id: string }>; nextPageToken?: string }>(
       `/users/me/threads?${params}`,
@@ -616,49 +648,79 @@ async function listThreadIds(query: string, accessToken: string): Promise<string
     );
     ids.push(...(page.threads ?? []).map((thread) => thread.id));
     pageToken = page.nextPageToken;
-  } while (pageToken);
+  } while (pageToken && ids.length <= MAX_BULK_THREADS);
+
+  if (ids.length > MAX_BULK_THREADS) {
+    throw new Error(`More than ${MAX_BULK_THREADS} threads match. Narrow the Gmail query before continuing.`);
+  }
 
   return ids;
 }
 
-async function modifyThreadIds(threadIds: string[], accessToken: string, body: GmailThreadModifyBody) {
-  for (const threadId of uniqueValues(threadIds)) {
+function boundedBulkThreadIds(threadIds: string[]) {
+  const uniqueThreadIds = uniqueValues(threadIds);
+  if (uniqueThreadIds.length > MAX_BULK_THREADS) {
+    throw new Error(`More than ${MAX_BULK_THREADS} threads match. Narrow the Gmail query before continuing.`);
+  }
+  return uniqueThreadIds;
+}
+
+type GmailRequestProgress = (completed: number, total: number) => void;
+
+async function modifyThreadIds(
+  threadIds: string[],
+  accessToken: string,
+  body: GmailThreadModifyBody,
+  onProgress?: GmailRequestProgress,
+) {
+  const uniqueThreadIds = boundedBulkThreadIds(threadIds);
+  let completed = 0;
+  await mapWithConcurrency(uniqueThreadIds, GMAIL_REQUEST_CONCURRENCY, async (threadId) => {
     await gmailPost(`/users/me/threads/${encodeURIComponent(threadId)}/modify`, accessToken, {
       ...body,
     });
-  }
+    onProgress?.(++completed, uniqueThreadIds.length);
+  });
 }
 
-async function markThreadIdsRead(threadIds: string[], accessToken: string) {
-  await modifyThreadIds(threadIds, accessToken, { removeLabelIds: ["UNREAD"] });
-}
-
-async function archiveThreadIds(threadIds: string[]) {
+async function archiveThreadIds(threadIds: string[], onProgress?: GmailRequestProgress) {
   if (threadIds.length === 0) return;
   const accessToken = await getAccessToken();
-  await modifyThreadIds(threadIds, accessToken, { removeLabelIds: ["INBOX", "UNREAD"] });
+  await modifyThreadIds(threadIds, accessToken, { removeLabelIds: ["INBOX", "UNREAD"] }, onProgress);
 }
 
-async function spamThreadIds(threadIds: string[]) {
+async function spamThreadIds(threadIds: string[], onProgress?: GmailRequestProgress) {
   if (threadIds.length === 0) return;
   const accessToken = await getAccessToken();
-  await modifyThreadIds(threadIds, accessToken, { addLabelIds: ["SPAM"], removeLabelIds: ["INBOX", "UNREAD"] });
+  await modifyThreadIds(
+    threadIds,
+    accessToken,
+    { addLabelIds: ["SPAM"], removeLabelIds: ["INBOX", "UNREAD"] },
+    onProgress,
+  );
 }
 
-async function trashThreadIds(threadIds: string[]) {
-  const uniqueThreadIds = uniqueValues(threadIds);
+async function trashThreadIds(threadIds: string[], onProgress?: GmailRequestProgress) {
+  const uniqueThreadIds = boundedBulkThreadIds(threadIds);
   if (uniqueThreadIds.length === 0) return;
   const accessToken = await getAccessToken();
-  await markThreadIdsRead(uniqueThreadIds, accessToken);
-  for (const threadId of uniqueThreadIds) {
+  let completed = 0;
+  await mapWithConcurrency(uniqueThreadIds, GMAIL_REQUEST_CONCURRENCY, async (threadId) => {
+    await gmailPost(`/users/me/threads/${encodeURIComponent(threadId)}/modify`, accessToken, {
+      removeLabelIds: ["UNREAD"],
+    });
     await gmailPost(`/users/me/threads/${encodeURIComponent(threadId)}/trash`, accessToken, {});
-  }
+    onProgress?.(++completed, uniqueThreadIds.length);
+  });
 }
 
-async function collectThreadSummaries(threadIds: string[], accessToken: string): Promise<SenderInboxThread[]> {
-  const summaries: SenderInboxThread[] = [];
-
-  for (const threadId of threadIds) {
+async function collectThreadSummaries(
+  threadIds: string[],
+  accessToken: string,
+  onProgress?: GmailRequestProgress,
+): Promise<SenderInboxThread[]> {
+  let completed = 0;
+  return await mapWithConcurrency(threadIds, GMAIL_REQUEST_CONCURRENCY, async (threadId) => {
     const thread = await gmailGet<{
       id: string;
       snippet?: string;
@@ -666,15 +728,15 @@ async function collectThreadSummaries(threadIds: string[], accessToken: string):
     }>(`/users/me/threads/${encodeURIComponent(threadId)}?${new URLSearchParams({ format: "metadata" })}`, accessToken);
     const latestMessage = thread.messages?.at(-1);
 
-    summaries.push({
+    const summary = {
       threadId: thread.id,
       subject: headerValue(latestMessage?.payload?.headers, "Subject"),
       date: headerValue(latestMessage?.payload?.headers, "Date"),
       snippet: latestMessage?.snippet ?? thread.snippet ?? "",
-    });
-  }
-
-  return summaries;
+    };
+    onProgress?.(++completed, threadIds.length);
+    return summary;
+  });
 }
 
 async function sendReply(item: InboxSweepItem, body: string) {
@@ -807,14 +869,19 @@ function subjectKeywords(subject: string) {
     .slice(0, 4);
 }
 
+function bulkSenderEmail(item: InboxSweepItem) {
+  if (!item.senderEmail) throw new Error("Cannot select similar messages because the sender address is missing.");
+  return item.senderEmail;
+}
+
 function similarInboxQuery(item: InboxSweepItem) {
   const keywords = subjectKeywords(item.subject);
   const subjectTerms = keywords.map((keyword) => `subject:${keyword}`).join(" ");
-  return [`in:inbox`, `from:${item.senderEmail}`, subjectTerms].filter(Boolean).join(" ");
+  return [`in:inbox`, `from:${bulkSenderEmail(item)}`, subjectTerms].filter(Boolean).join(" ");
 }
 
 function broadSimilarInboxQuery(item: InboxSweepItem) {
-  return [`in:inbox`, `from:${item.senderEmail}`].filter(Boolean).join(" ");
+  return `in:inbox from:${bulkSenderEmail(item)}`;
 }
 
 async function collectInboxThreadIdsFromSender(item: InboxSweepItem) {
@@ -822,18 +889,22 @@ async function collectInboxThreadIdsFromSender(item: InboxSweepItem) {
   const threadIds = await listThreadIds(query, await getAccessToken());
   return {
     query,
-    threadIds: uniqueValues([item.threadId, ...threadIds]),
+    threadIds: boundedBulkThreadIds([item.threadId, ...threadIds]),
   };
 }
 
-async function collectSimilarInboxSelection(item: InboxSweepItem, query: string) {
+async function collectSimilarInboxSelection(item: InboxSweepItem, query: string, onProgress?: (message: string) => void) {
   const accessToken = await getAccessToken();
   const threadIds = await listThreadIds(query, accessToken);
-  const uniqueThreadIds = uniqueValues([item.threadId, ...threadIds]);
+  const uniqueThreadIds = boundedBulkThreadIds([item.threadId, ...threadIds]);
+  const previewThreadIds = uniqueThreadIds.slice(0, BULK_PREVIEW_THREADS);
+  onProgress?.(`Found ${uniqueThreadIds.length} threads. Loading preview 0/${previewThreadIds.length}…`);
   return {
     query,
     threadIds: uniqueThreadIds,
-    summaries: await collectThreadSummaries(uniqueThreadIds, accessToken),
+    summaries: await collectThreadSummaries(previewThreadIds, accessToken, (completed, total) => {
+      onProgress?.(`Found ${uniqueThreadIds.length} threads. Loading preview ${completed}/${total}…`);
+    }),
   };
 }
 
@@ -1064,7 +1135,10 @@ async function runInboxSweep(ctx: any) {
           tui.requestRender();
           await execFileAsync("open", [current.chosenUnsubscribeUrl]);
           const { query, threadIds } = await collectInboxThreadIdsFromSender(current);
-          await archiveThreadIds(threadIds);
+          await archiveThreadIds(threadIds, (completed, total) => {
+            message = `Archiving sender threads ${completed}/${total}…`;
+            tui.requestRender();
+          });
           removeThreadIdsFromCache(threadIds);
           nextItemPromise = null;
           ctx.ui.notify(`opened unsubscribe link and archived ${threadIds.length} inbox thread(s) using query: ${query}`, "info");
@@ -1084,8 +1158,12 @@ async function runInboxSweep(ctx: any) {
           const { query, threadIds } = result.selection;
           message = `${isTrash ? "Moving" : "Archiving"} ${threadIds.length} similar thread(s)…`;
           tui.requestRender();
-          if (isTrash) await trashThreadIds(threadIds);
-          else await archiveThreadIds(threadIds);
+          const reportProgress = (completed: number, total: number) => {
+            message = `${isTrash ? "Moving to trash" : "Archiving"} similar threads ${completed}/${total}…`;
+            tui.requestRender();
+          };
+          if (isTrash) await trashThreadIds(threadIds, reportProgress);
+          else await archiveThreadIds(threadIds, reportProgress);
           removeThreadIdsFromCache(threadIds);
           nextItemPromise = null;
           ctx.ui.notify(`${isTrash ? "moved" : "archived"} ${threadIds.length} similar inbox thread(s) using query: ${query}`, "info");
